@@ -1,0 +1,288 @@
+
+
+# **NII Dashboard – Agent Development Guidelines**
+
+This document defines how coding agents should work on the repository  
+**https://github.com/AutoNaver/NII**  
+and how to implement the Net Interest Income (NII) dashboard based on the provided Excel input (`Input_Data.xlsx`).
+
+The goal is to ensure consistent, modular, and correct contributions across all agents.
+
+---
+
+# **1. Project Overview**
+
+The repository contains a tool for calculating and visualizing **Net Interest Income (NII)** for a portfolio of loans and deposits.  
+Each deal in the portfolio:
+
+- Has **positive or negative notional**  
+  - Positive = asset (loan)  
+  - Negative = liability (deposit)
+- Has a **coupon** (fixed or floating)
+- Has **trade date**, **value date**, and **maturity date**
+- Is uniquely identified by an **ID**
+- Must follow **30/360 day‑count convention**
+- May exist only for part of the year (booked or matured mid‑period)
+
+The dashboard must compute NII for any **end‑of‑month date** and provide comparison views.
+
+---
+
+# **2. Input Data Specification**
+
+Agents must assume:
+
+- Input is provided via the Excel file **`Input_Data.xlsx`**.
+- Each row represents a deal.
+- Required columns include (names may vary; agents must normalize them):
+  - `deal_id`
+  - `notional`
+  - `coupon`
+  - `coupon_type` (fixed / floating)
+  - `trade_date`
+  - `value_date`
+  - `maturity_date`
+  - `index` (for floating, e.g., EURIBOR)
+  - `spread` (for floating)
+- All dates must be parsed into Python `datetime` objects.
+- Day‑count convention must be **30/360** for accrual calculations.
+
+Agents must implement a **data validation layer** that checks for missing or malformed fields.
+
+---
+
+# **3. Core Calculations**
+
+Agents must implement the following logic:
+
+### **3.1 Active Deal Determination**
+A deal is active on date \( t \) if:
+
+\[
+\text{value\_date} \le t < \text{maturity\_date}
+\]
+
+### **3.2 Accrued Interest (30/360)**
+For fixed coupons:
+
+\[
+\text{Accrued Interest} = \text{Notional} \cdot \text{Coupon} \cdot \frac{\text{Days}_{30/360}}{360}
+\]
+
+For floating coupons:
+
+\[
+\text{Effective Coupon} = \text{Index}(t) + \text{Spread}
+\]
+
+Agents must implement a pluggable index‑curve module (mocked or real).
+
+### **3.3 Monthly Realized NII**
+For a month \( M \):
+
+\[
+\text{NII}(M) = \sum_{\text{deals}} \text{Interest Paid in Month M}
+\]
+
+Interest must be shown in **EUR**, not percentages.
+
+### **3.4 Monthly Volumes**
+For each month:
+
+- Total active notional
+- Weighted average coupon
+- Interest paid
+
+---
+
+# **4. Dashboard Feature Requirements**
+
+Agents must implement the following features:
+
+### **4.1 End‑of‑Month View**
+User selects a month‑end date.  
+Dashboard must show:
+
+- Realized NII for the previous month
+- Active deals at month‑end
+- Accrued interest up to month‑end
+- Monthly volumes and coupons
+
+### **4.2 Comparison Date**
+User selects a second month‑end date.  
+Dashboard must show:
+
+- Difference in NII
+- Difference in active deals
+- Difference in volumes
+- Difference in coupons
+
+### **4.3 Deal‑Level Difference Visualization**
+Agents must implement:
+
+- A table of deals added, removed, or changed between two dates
+- Highlighting of:
+  - New deals
+  - Matured deals
+  - Notional changes
+  - Coupon changes
+
+### **4.4 Interest Payments in EUR**
+Whenever possible, show:
+
+- **EUR interest amounts**
+- Not percentages
+
+This avoids misleading results when notional = 0 but coupon exists.
+
+### **4.5 Monthly Buckets**
+For each month:
+
+- Total notional
+- Average coupon
+- Total interest paid
+
+Displayed as:
+
+- Bar charts (volumes)
+- Line charts (coupons)
+- Combined chart (optional)
+
+---
+
+# **5. Agent Workflow Rules**
+
+Agents must follow these rules when contributing to the repo.
+
+---
+
+## **5.1 Branching Model**
+
+- All agents must create feature branches:
+  ```
+  feature/<agent_name>/<short_description>
+  ```
+- No direct commits to `main`.
+- Pull requests must include:
+  - Summary of changes
+  - Tests added/updated
+  - Validation that dashboard still runs
+
+---
+
+## **5.2 Code Style**
+
+- Use **Python 3.10+**
+- Use **Pandas** for data manipulation
+- Use **Plotly** or **Altair** for visualizations
+- Use **Streamlit** or **Dash** for the dashboard UI
+- Follow PEP8
+- Add docstrings to all functions
+- Add type hints everywhere
+
+---
+
+## **5.3 Testing Requirements**
+
+Agents must:
+
+- Add unit tests for:
+  - Day‑count calculations
+  - Accrual logic
+  - Monthly NII aggregation
+  - Deal activation logic
+- Use `pytest`
+- Ensure tests run in CI
+
+---
+
+## **5.4 Data Handling Rules**
+
+- Never modify the original Excel input file
+- Implement a loader that:
+  - Normalizes column names
+  - Validates data types
+  - Logs warnings for missing fields
+- Cache intermediate results for performance
+
+---
+
+## **5.5 Documentation Requirements**
+
+Agents must update:
+
+- `README.md` for new features
+- `docs/` folder for:
+  - Calculation methodology
+  - Data model
+  - Dashboard usage
+
+---
+
+# **6. Architecture Guidelines**
+
+Agents should structure the repo as follows:
+
+```
+/src
+    /data
+        loader.py
+        validator.py
+    /models
+        deal.py
+        portfolio.py
+        curves.py
+    /calculations
+        accrual.py
+        nii.py
+        volumes.py
+    /dashboard
+        app.py
+        components/
+        plots/
+    /utils
+        date_utils.py
+        logging.py
+
+/tests
+    test_accrual.py
+    test_loader.py
+    test_nii.py
+
+/docs
+    methodology.md
+    dashboard_guide.md
+```
+
+---
+
+# **7. Agent Behavior Expectations**
+
+Agents must:
+
+- Write modular, testable code
+- Avoid duplication
+- Prefer pure functions over side effects
+- Use vectorized Pandas operations where possible
+- Add logging for all major steps
+- Avoid hard‑coding dates or paths
+- Ensure reproducibility
+
+Agents must not:
+
+- Introduce external dependencies without justification
+- Commit large data files
+- Change the input format without discussion
+
+---
+
+# **8. Future Extensions (Optional for Agents)**
+
+Agents may propose or implement:
+
+- Forward‑looking NII projections
+- Scenario analysis (rate shocks)
+- Floating‑rate curve integration
+- Deal‑level drill‑down pages
+- Export to Excel or PDF
+
