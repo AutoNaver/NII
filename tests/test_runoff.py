@@ -2,64 +2,9 @@ import pandas as pd
 
 from src.calculations.volumes import (
     compare_monthly_bucket_series,
-    compare_runoff_profiles,
+    compute_calendar_month_runoff_view,
     compute_runoff_delta_attribution,
-    compute_runoff_profile,
 )
-
-
-def test_runoff_profile_rolls_down_after_maturity() -> None:
-    deals = pd.DataFrame(
-        [
-            {
-                'deal_id': 1,
-                'trade_date': pd.Timestamp('2025-01-01'),
-                'value_date': pd.Timestamp('2025-01-01'),
-                'maturity_date': pd.Timestamp('2025-01-31'),
-                'notional': 100.0,
-                'coupon': 0.02,
-            },
-            {
-                'deal_id': 2,
-                'trade_date': pd.Timestamp('2025-01-01'),
-                'value_date': pd.Timestamp('2025-01-01'),
-                'maturity_date': pd.Timestamp('2025-02-28'),
-                'notional': 200.0,
-                'coupon': 0.02,
-            },
-        ]
-    )
-    profile = compute_runoff_profile(deals, pd.Timestamp('2025-01-31'))
-    assert float(profile.iloc[0]['remaining_abs_notional']) == 200.0
-    assert float(profile.iloc[1]['remaining_abs_notional']) == 0.0
-
-
-def test_compare_runoff_profiles_computes_deltas() -> None:
-    p1 = pd.DataFrame(
-        {
-            'month_offset': [0, 1],
-            'month_end': pd.to_datetime(['2025-01-31', '2025-02-28']),
-            'remaining_notional': [100.0, 0.0],
-            'remaining_abs_notional': [100.0, 0.0],
-            'matured_abs_notional': [0.0, 100.0],
-            'remaining_pct_of_initial_abs': [1.0, 0.0],
-            'active_deal_count': [1, 0],
-        }
-    )
-    p2 = pd.DataFrame(
-        {
-            'month_offset': [0, 1],
-            'month_end': pd.to_datetime(['2025-02-28', '2025-03-31']),
-            'remaining_notional': [200.0, 100.0],
-            'remaining_abs_notional': [200.0, 100.0],
-            'matured_abs_notional': [0.0, 100.0],
-            'remaining_pct_of_initial_abs': [1.0, 0.5],
-            'active_deal_count': [2, 1],
-        }
-    )
-    cmp_df = compare_runoff_profiles(p1, p2)
-    assert float(cmp_df.iloc[0]['remaining_abs_notional_delta']) == 100.0
-    assert float(cmp_df.iloc[1]['active_deal_count_delta']) == 1.0
 
 
 def test_compare_monthly_bucket_series_computes_calendar_deltas() -> None:
@@ -108,7 +53,144 @@ def test_runoff_delta_attribution_has_added_and_matured_components() -> None:
         ]
     )
     out = compute_runoff_delta_attribution(deals, pd.Timestamp('2025-01-31'), pd.Timestamp('2025-02-28'))
-    assert {'added_remaining_abs_notional', 'matured_remaining_abs_notional', 'remaining_abs_notional_delta'}.issubset(
-        out.columns
+    assert {
+        'remaining_maturity_months',
+        'added_abs_notional',
+        'matured_abs_notional',
+        'added_deal_count',
+        'matured_deal_count',
+        'remaining_abs_notional_delta',
+    }.issubset(out.columns)
+    assert (out['remaining_abs_notional_delta'] == (out['abs_notional_d2'] - out['abs_notional_d1'])).all()
+
+
+def test_calendar_month_runoff_view_maps_buckets_to_calendar_month_end() -> None:
+    deals = pd.DataFrame(
+        [
+            {
+                'deal_id': 1,
+                'trade_date': pd.Timestamp('2025-01-01'),
+                'value_date': pd.Timestamp('2025-01-01'),
+                'maturity_date': pd.Timestamp('2025-03-31'),
+                'notional': 100.0,
+                'coupon': 0.02,
+            },
+            {
+                'deal_id': 2,
+                'trade_date': pd.Timestamp('2025-02-01'),
+                'value_date': pd.Timestamp('2025-02-01'),
+                'maturity_date': pd.Timestamp('2025-05-31'),
+                'notional': 150.0,
+                'coupon': 0.02,
+            },
+        ]
     )
-    assert (out['remaining_abs_notional_delta'] == (out['remaining_abs_notional_d2'] - out['remaining_abs_notional_d1'])).all()
+    t1 = pd.Timestamp('2025-01-31')
+    t2 = pd.Timestamp('2025-02-28')
+    runoff = compute_runoff_delta_attribution(deals, t1, t2)
+    calendar = compute_calendar_month_runoff_view(runoff, t1, t2, deals_df=deals)
+
+    assert 'calendar_month_end' in calendar.columns
+    assert 'abs_notional_t1' in calendar.columns
+    assert 'abs_notional_t2' in calendar.columns
+    assert 'effective_interest_t1' in calendar.columns
+    assert 'effective_interest_t2' in calendar.columns
+    assert 'added_abs_notional' in calendar.columns
+    assert 'matured_abs_notional' in calendar.columns
+    assert (calendar['abs_notional_delta'] == (calendar['abs_notional_t2'] - calendar['abs_notional_t1'])).all()
+    assert calendar['calendar_month_end'].min() == pd.Timestamp('2025-01-31')
+
+
+def test_calendar_month_effective_interest_uses_day_count_for_mid_month_adds_and_maturities() -> None:
+    deals = pd.DataFrame(
+        [
+            {
+                'deal_id': 1,
+                'trade_date': pd.Timestamp('2025-01-01'),
+                'value_date': pd.Timestamp('2025-01-01'),
+                'maturity_date': pd.Timestamp('2025-03-31'),
+                'notional': 100.0,
+                'coupon': 0.36,
+            },
+            {
+                'deal_id': 2,
+                'trade_date': pd.Timestamp('2025-02-12'),
+                'value_date': pd.Timestamp('2025-02-12'),
+                'maturity_date': pd.Timestamp('2025-04-30'),
+                'notional': 100.0,
+                'coupon': 0.36,
+            },
+            {
+                'deal_id': 3,
+                'trade_date': pd.Timestamp('2025-01-01'),
+                'value_date': pd.Timestamp('2025-01-01'),
+                'maturity_date': pd.Timestamp('2025-02-12'),
+                'notional': 100.0,
+                'coupon': 0.36,
+            },
+        ]
+    )
+    t1 = pd.Timestamp('2025-01-31')
+    t2 = pd.Timestamp('2025-02-28')
+    runoff = compute_runoff_delta_attribution(deals, t1, t2)
+    calendar = compute_calendar_month_runoff_view(runoff, t1, t2, deals_df=deals)
+
+    feb_row = calendar.loc[calendar['calendar_month_end'] == pd.Timestamp('2025-02-28')].iloc[0]
+    assert round(float(feb_row['added_effective_interest']), 6) == 1.9
+    assert round(float(feb_row['matured_effective_interest']), 6) == 1.9
+    assert round(float(feb_row['effective_interest_t1']), 6) == 4.1
+    assert round(float(feb_row['effective_interest_t2']), 6) == 6.0
+
+
+def test_runoff_signed_notional_fields_handle_negative_notionals() -> None:
+    deals = pd.DataFrame(
+        [
+            {
+                'deal_id': 1,
+                'trade_date': pd.Timestamp('2025-01-01'),
+                'value_date': pd.Timestamp('2025-01-01'),
+                'maturity_date': pd.Timestamp('2025-03-31'),
+                'notional': 100.0,
+                'coupon': 0.02,
+            },
+            {
+                'deal_id': 2,
+                'trade_date': pd.Timestamp('2025-01-01'),
+                'value_date': pd.Timestamp('2025-01-01'),
+                'maturity_date': pd.Timestamp('2025-05-31'),
+                'notional': -80.0,
+                'coupon': 0.02,
+            },
+        ]
+    )
+    t1 = pd.Timestamp('2025-01-31')
+    t2 = pd.Timestamp('2025-02-28')
+    runoff = compute_runoff_delta_attribution(deals, t1, t2)
+    calendar = compute_calendar_month_runoff_view(runoff, t1, t2, deals_df=deals)
+
+    assert {'signed_notional_d1', 'signed_notional_d2', 'signed_notional_delta'}.issubset(runoff.columns)
+    assert {'signed_notional_t1', 'signed_notional_t2', 'signed_notional_delta'}.issubset(calendar.columns)
+    assert (runoff['signed_notional_delta'] == (runoff['signed_notional_d2'] - runoff['signed_notional_d1'])).all()
+    assert (calendar['signed_notional_delta'] == (calendar['signed_notional_t2'] - calendar['signed_notional_t1'])).all()
+
+
+def test_runoff_effective_interest_bucket_uses_month_overlap_days() -> None:
+    deals = pd.DataFrame(
+        [
+            {
+                'deal_id': 1,
+                'trade_date': pd.Timestamp('2025-01-01'),
+                'value_date': pd.Timestamp('2025-01-01'),
+                'maturity_date': pd.Timestamp('2025-02-12'),
+                'notional': 100.0,
+                'coupon': 0.36,
+            },
+        ]
+    )
+    t1 = pd.Timestamp('2025-01-31')
+    t2 = pd.Timestamp('2025-02-28')
+    runoff = compute_runoff_delta_attribution(deals, t1, t2)
+
+    # Bucket 1 for T1 corresponds to February; overlap is Feb 1 to Feb 12 -> 11 days (30/360).
+    bucket1 = runoff.loc[runoff['remaining_maturity_months'] == 1].iloc[0]
+    assert round(float(bucket1['effective_interest_d1']), 6) == 1.1

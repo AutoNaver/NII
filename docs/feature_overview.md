@@ -27,9 +27,10 @@ This document tracks feature status for the NII Dashboard and acts as the canoni
 | Dashboard | Comparison mode (T1 vs T2) | Implemented | Deltas for NII, active deals, accrued interest, volume, coupon |
 | Dashboard | Deal-level differences (added/matured/changed) | Implemented | Includes consolidated highlighted change view |
 | Dashboard | EUR-first display | Implemented | Interest shown as currency amounts |
-| Dashboard | Combined chart (notional + coupon) | Implemented | Dual-axis Plotly chart |
+| Dashboard | Table-first monthly buckets (notional/coupon/interest) | Implemented | Weighted coupon shown in percentage points; interest shown as EUR (30/360) |
 | Dashboard | Monthly runoff cohort view (month-offset roll-down) | Implemented | Month 0 starts with full active cohort and runs off by maturity |
 | Dashboard | Monthly bucket and runoff delta tables for T1 vs T2 | Implemented | Tables provide exact reconciliation next to charts |
+| Dashboard | Activity graphs (active vs added deals, active vs added notional*coupon) | Implemented | Monthly bucket activity diagnostics |
 | Testing | Unit tests for day-count, accrual, activation, NII, loader | Implemented | Pytest suite in `tests/` |
 
 ## Planned Features (Next)

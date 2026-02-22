@@ -6,12 +6,30 @@ import pandas as pd
 import streamlit as st
 
 
+def _styled_numeric_table(df: pd.DataFrame) -> pd.io.formats.style.Styler | pd.DataFrame:
+    if df.empty:
+        return df
+    fmt: dict[str, str] = {}
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            name = str(col).lower()
+            if 'count' in name:
+                fmt[col] = '{:,.0f}'
+            elif 'coupon' in name:
+                fmt[col] = '{:,.4f}'
+            else:
+                fmt[col] = '{:,.2f}'
+    if not fmt:
+        return df
+    return df.style.format(fmt, na_rep='-')
+
+
 def _show_table(title: str, df: pd.DataFrame) -> None:
     st.markdown(f'**{title} ({len(df)})**')
     if df.empty:
         st.caption('No rows')
     else:
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(_styled_numeric_table(df), use_container_width=True)
 
 
 def render_deal_diff_tables(diff: dict[str, pd.DataFrame | float]) -> None:
@@ -32,6 +50,18 @@ def render_deal_diff_tables(diff: dict[str, pd.DataFrame | float]) -> None:
                 return ''
 
             styled = changes.style.map(_status_color, subset=['status'])
+            num_fmt: dict[str, str] = {}
+            for col in changes.columns:
+                if pd.api.types.is_numeric_dtype(changes[col]):
+                    name = str(col).lower()
+                    if 'count' in name:
+                        num_fmt[col] = '{:,.0f}'
+                    elif 'coupon' in name:
+                        num_fmt[col] = '{:,.4f}'
+                    else:
+                        num_fmt[col] = '{:,.2f}'
+            if num_fmt:
+                styled = styled.format(num_fmt, na_rep='-')
             st.markdown('**Consolidated Changes**')
             st.dataframe(styled, use_container_width=True)
 
