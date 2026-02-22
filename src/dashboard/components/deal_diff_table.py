@@ -5,23 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-
-def _styled_numeric_table(df: pd.DataFrame) -> pd.io.formats.style.Styler | pd.DataFrame:
-    if df.empty:
-        return df
-    fmt: dict[str, str] = {}
-    for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col]):
-            name = str(col).lower()
-            if 'count' in name:
-                fmt[col] = '{:,.0f}'
-            elif 'coupon' in name:
-                fmt[col] = '{:,.4f}'
-            else:
-                fmt[col] = '{:,.2f}'
-    if not fmt:
-        return df
-    return df.style.format(fmt, na_rep='-')
+from src.dashboard.components.formatting import style_numeric_table
 
 
 def _show_table(title: str, df: pd.DataFrame) -> None:
@@ -29,12 +13,11 @@ def _show_table(title: str, df: pd.DataFrame) -> None:
     if df.empty:
         st.caption('No rows')
     else:
-        st.dataframe(_styled_numeric_table(df), use_container_width=True)
+        st.dataframe(style_numeric_table(df), use_container_width=True)
 
 
-def render_deal_diff_tables(diff: dict[str, pd.DataFrame | float]) -> None:
+def render_deal_diff_tables(diff: dict[str, pd.DataFrame | float], compact_mode: bool = False) -> None:
     """Render all difference tables for comparison mode."""
-    st.subheader('Deal-Level Differences')
     changes = diff.get('deal_changes', pd.DataFrame())
     if isinstance(changes, pd.DataFrame):
         if changes.empty:
@@ -65,7 +48,17 @@ def render_deal_diff_tables(diff: dict[str, pd.DataFrame | float]) -> None:
             st.markdown('**Consolidated Changes**')
             st.dataframe(styled, use_container_width=True)
 
-    _show_table('Added Deals', diff['added'])
-    _show_table('Matured/Removed Deals', diff['matured'])
-    _show_table('Notional Changes', diff['notional_changed'])
-    _show_table('Coupon Changes', diff['coupon_changed'])
+    if compact_mode:
+        with st.expander('Added Deals', expanded=False):
+            _show_table('Added Deals', diff['added'])
+        with st.expander('Matured/Removed Deals', expanded=False):
+            _show_table('Matured/Removed Deals', diff['matured'])
+        with st.expander('Notional Changes', expanded=False):
+            _show_table('Notional Changes', diff['notional_changed'])
+        with st.expander('Coupon Changes', expanded=False):
+            _show_table('Coupon Changes', diff['coupon_changed'])
+    else:
+        _show_table('Added Deals', diff['added'])
+        _show_table('Matured/Removed Deals', diff['matured'])
+        _show_table('Notional Changes', diff['notional_changed'])
+        _show_table('Coupon Changes', diff['coupon_changed'])

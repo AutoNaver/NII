@@ -1,4 +1,4 @@
-﻿"""Streamlit app entrypoint for NII dashboard MVP."""
+"""Streamlit app entrypoint for NII dashboard MVP."""
 
 from __future__ import annotations
 
@@ -17,14 +17,15 @@ from src.calculations.nii import (
     active_deals_snapshot,
     compare_month_ends,
     compute_monthly_realized_nii,
-    is_active,
 )
 from src.calculations.volumes import (
     compute_calendar_month_runoff_view,
     compute_monthly_buckets,
     compute_runoff_delta_attribution,
 )
+from src.dashboard.components.controls import render_global_controls, render_runoff_controls
 from src.dashboard.components.deal_diff_table import render_deal_diff_tables
+from src.dashboard.components.formatting import style_numeric_table
 from src.dashboard.components.summary_cards import render_summary_cards
 from src.dashboard.plots.interest_daily import render_daily_interest_chart
 from src.dashboard.plots.runoff_plots import render_calendar_runoff_charts, render_runoff_delta_charts
@@ -52,23 +53,6 @@ def _load_refill_logic(path: str) -> pd.DataFrame | None:
         return xl.parse(sheet_name)
     except Exception:
         return None
-
-
-def _stable_radio(
-    *,
-    label: str,
-    options: list[str],
-    key: str,
-    default: str,
-    horizontal: bool = True,
-) -> str:
-    current = st.session_state.get(key, default)
-    if current not in options:
-        current = default if default in options else options[0]
-        st.session_state[key] = current
-    idx = options.index(current)
-    return st.radio(label, options=options, index=idx, horizontal=horizontal, key=key)
-
 
 
 def _available_month_ends(deals_df: pd.DataFrame) -> list[pd.Timestamp]:
@@ -103,24 +87,6 @@ def _dual_view_metric_table(row1: pd.Series, row2: pd.Series, label_t1: str, lab
     return pd.DataFrame(data).set_index('metric')
 
 
-def _styled_numeric_table(df: pd.DataFrame) -> pd.io.formats.style.Styler | pd.DataFrame:
-    if df.empty:
-        return df
-    fmt: dict[str, str] = {}
-    for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col]):
-            name = str(col).lower()
-            if 'count' in name:
-                fmt[col] = '{:,.0f}'
-            elif 'coupon' in name:
-                fmt[col] = '{:,.4f}'
-            else:
-                fmt[col] = '{:,.2f}'
-    if not fmt:
-        return df
-    return df.style.format(fmt, na_rep='-')
-
-
 def _compute_daily_interest(deals_df: pd.DataFrame, month_end: pd.Timestamp) -> pd.DataFrame:
     """Compute daily interest breakdown for the calendar month of month_end using 30/360 scaling.
 
@@ -135,10 +101,6 @@ def _compute_daily_interest(deals_df: pd.DataFrame, month_end: pd.Timestamp) -> 
     all_days = pd.date_range(start=start, end=end, freq='D')
     days_in_month = len(all_days)
 
-    # 30/360 daily handling:
-    # - 31-day month: exclude day 31 from the plotted daily series.
-    # - 30-day month: each day weight is 1.
-    # - short month (e.g., Feb): keep all days and add the top-up to last day so weights sum to 30.
     if days_in_month == 31:
         days = all_days[:-1]
         weights = pd.Series(1.0, index=days)
@@ -148,7 +110,6 @@ def _compute_daily_interest(deals_df: pd.DataFrame, month_end: pd.Timestamp) -> 
         if days_in_month < 30:
             weights.iloc[-1] += float(30 - days_in_month)
 
-    # Monthly cohorts used for decomposition
     prior_cohort = deals_df[deals_df['value_date'] < start].copy()
     monthly_booked = deals_df[(deals_df['value_date'] >= start) & (deals_df['value_date'] <= end)].copy()
     matured_in_month_all = deals_df[
@@ -159,14 +120,12 @@ def _compute_daily_interest(deals_df: pd.DataFrame, month_end: pd.Timestamp) -> 
 
     rows = []
     for d in days:
-        # Existing and added are active-only contributions for the day.
         existing = prior_cohort[
             (prior_cohort['value_date'] <= d) & (d < prior_cohort['maturity_date'])
         ]
         added = monthly_booked[
             (monthly_booked['value_date'] <= d) & (d < monthly_booked['maturity_date'])
         ]
-        # Matured effect is cumulative across the month (visible from maturity date onward).
         matured_cum = matured_in_month_all[matured_in_month_all['maturity_date'] <= d]
 
         interest_existing = (
@@ -184,11 +143,8 @@ def _compute_daily_interest(deals_df: pd.DataFrame, month_end: pd.Timestamp) -> 
         interest_existing *= day_weight
         interest_added *= day_weight
         interest_matured *= day_weight
-        # Total line shows active daily interest only; matured is shown as separate negative component.
         interest_total = interest_existing + interest_added
 
-        # Daily relevant notionals use signed values so positive/negative notionals
-        # are handled consistently with monthly total active notional metrics.
         notional_existing = float(existing['notional'].sum()) if not existing.empty else 0.0
         notional_added = float(added['notional'].sum()) if not added.empty else 0.0
         matured_notional_contrib = (
@@ -312,60 +268,118 @@ def _build_runoff_calendar_table(calendar_df: pd.DataFrame, t1: pd.Timestamp, t2
     )
 
 
+def _filter_runoff_bucket_table_by_view(table: pd.DataFrame, chart_view: str) -> pd.DataFrame:
+    if table.empty:
+        return table
+    if chart_view == 'Deal Count Decomposition':
+        keep = {'Deal Count'}
+    elif 'Effective Interest' in chart_view:
+        keep = {'Effective Interest'}
+    else:
+        keep = {'Notional (EUR)'}
+    return table[table['Metric'].isin(keep)].copy()
+
+
+def _filter_runoff_calendar_table_by_view(table: pd.DataFrame, chart_view: str) -> pd.DataFrame:
+    if table.empty:
+        return table
+
+    cols = ['Calendar Month End']
+    lower_cols = {c: str(c).lower() for c in table.columns}
+
+    def _matches(key: str) -> list[str]:
+        return [c for c, lc in lower_cols.items() if key in lc]
+
+    if chart_view == 'Deal Count Decomposition':
+        cols.extend(_matches('deal count'))
+    elif chart_view in {'Cumulative Notional', 'Cumulative Notional (Refill/Growth)'}:
+        cols.extend(_matches('cumulative notional'))
+    elif chart_view in {'Effective Interest Contribution'}:
+        cols.extend([c for c in _matches('effective interest') if 'cumulative' not in lower_cols[c]])
+        cols.extend(_matches('cumulative effective interest'))
+    elif 'Effective Interest' in chart_view:
+        cols.extend([c for c in _matches('effective interest') if 'cumulative' not in lower_cols[c]])
+    else:
+        cols.extend([c for c in _matches('notional ') if 'cumulative' not in lower_cols[c]])
+
+    cols = [c for c in cols if c in table.columns]
+    seen = set()
+    ordered = []
+    for col in cols:
+        if col in seen:
+            continue
+        seen.add(col)
+        ordered.append(col)
+    return table[ordered].copy()
+
+
 def main() -> None:
     st.set_page_config(page_title='NII Dashboard', layout='wide')
     st.title('Net Interest Income Dashboard')
 
-    input_path = st.text_input('Workbook path', value=str(DEFAULT_INPUT_PATH))
+    current_path = st.session_state.get('global_input_path', str(DEFAULT_INPUT_PATH))
+    try:
+        deals_probe, _ = _load(current_path)
+        month_ends = _available_month_ends(deals_probe)
+    except Exception:
+        month_ends = []
 
-    deals_df, curve_df = _load(input_path)
+    ui = render_global_controls(month_ends)
+    input_path = ui['input_path']
+    if input_path != current_path:
+        st.rerun()
+
+    try:
+        deals_df, curve_df = _load(input_path)
+    except Exception as exc:
+        st.error(f'Failed to load workbook at `{input_path}`: {exc}')
+        st.stop()
+
     refill_logic_df = _load_refill_logic(input_path)
+    st.session_state['runoff_has_refill_views'] = refill_logic_df is not None and not refill_logic_df.empty
 
     month_ends = _available_month_ends(deals_df)
     if not month_ends:
         st.error('No month-end dates available from input data.')
         return
 
-    default_t1_idx = 0
-    default_t2_idx = 1 if len(month_ends) > 1 else 0
-    t1 = st.selectbox('Monthly View 1 (T1)', month_ends, index=default_t1_idx, format_func=lambda d: d.date().isoformat())
+    t1 = ui['t1'] if ui['t1'] is not None else month_ends[0]
+    t2 = ui['t2'] if ui['t2_enabled'] else None
 
-    t2_enabled = st.checkbox('Enable Monthly View 2 (T2)', value=len(month_ends) > 1)
-    t2 = None
-    if t2_enabled:
-        t2 = st.selectbox(
-            'Monthly View 2 (T2)',
-            month_ends,
-            index=default_t2_idx,
-            format_func=lambda d: d.date().isoformat(),
-        )
+    overview_tab, daily_tab, runoff_tab, diff_tab = st.tabs(['Overview', 'Daily', 'Runoff', 'Deal Differences'])
 
     prev_start, prev_end = previous_calendar_month_window(t1)
-    realized_nii = compute_monthly_realized_nii(deals_df, prev_start, prev_end)
+    realized_nii_t1 = compute_monthly_realized_nii(deals_df, prev_start, prev_end)
     active_t1 = active_deals_snapshot(deals_df, t1)
     active_count_t1 = int(len(active_t1))
     accrued_t1 = accrued_interest_to_date(deals_df, t1)
-
     monthly_t1 = compute_monthly_buckets(deals_df, t1)
     row_t1 = monthly_t1[monthly_t1['month_end'] == t1].iloc[0]
 
-    if t2 is not None:
-        st.divider()
-        st.header('Monthly View Comparison')
+    if t2 is None:
+        with overview_tab:
+            render_summary_cards(realized_nii_t1, active_count_t1, accrued_t1, title=f'Metrics at {t1.date()}')
+            st.info('Enable `Monthly View 2 (T2)` in the sidebar to unlock comparison tabs.')
+        with daily_tab:
+            st.info('Comparison mode required. Enable `T2` in the sidebar.')
+        with runoff_tab:
+            st.info('Comparison mode required. Enable `T2` in the sidebar.')
+        with diff_tab:
+            st.info('Comparison mode required. Enable `T2` in the sidebar.')
+        return
 
-        prev_start_t2, prev_end_t2 = previous_calendar_month_window(t2)
-        realized_nii_t2 = compute_monthly_realized_nii(deals_df, prev_start_t2, prev_end_t2)
-        active_t2 = active_deals_snapshot(deals_df, t2)
-        active_count_t2 = int(len(active_t2))
-        accrued_t2 = accrued_interest_to_date(deals_df, t2)
+    prev_start_t2, prev_end_t2 = previous_calendar_month_window(t2)
+    realized_nii_t2 = compute_monthly_realized_nii(deals_df, prev_start_t2, prev_end_t2)
+    active_t2 = active_deals_snapshot(deals_df, t2)
+    active_count_t2 = int(len(active_t2))
+    accrued_t2 = accrued_interest_to_date(deals_df, t2)
+    monthly_t2 = compute_monthly_buckets(deals_df, t2)
+    row_t2 = monthly_t2[monthly_t2['month_end'] == t2].iloc[0]
 
-        monthly_t2 = compute_monthly_buckets(deals_df, t2)
-        row_t1 = monthly_t1[monthly_t1['month_end'] == t1].iloc[0]
-        row_t2 = monthly_t2[monthly_t2['month_end'] == t2].iloc[0]
-
+    with overview_tab:
         st.subheader('Monthly View Delta Summary (T2 - T1)')
         d1, d2, d3, d4, d5 = st.columns(5)
-        d1.metric('Realized NII Delta (EUR)', f'{(realized_nii_t2 - realized_nii):,.2f}')
+        d1.metric('Realized NII Delta (EUR)', f'{(realized_nii_t2 - realized_nii_t1):,.2f}')
         d2.metric('Active Deals Delta', f'{(active_count_t2 - active_count_t1):,d}')
         d3.metric('Accrued Interest Delta (EUR)', f'{(accrued_t2 - accrued_t1):,.2f}')
         d4.metric(
@@ -373,56 +387,27 @@ def main() -> None:
             f'{(float(row_t2["total_active_notional"]) - float(row_t1["total_active_notional"])):,.2f}',
         )
         d5.metric(
-            'Coupon Delta',
-            f'{(float(row_t2["weighted_avg_coupon"]) - float(row_t1["weighted_avg_coupon"])):.6f}',
+            'Coupon Delta (pp)',
+            f'{((float(row_t2["weighted_avg_coupon"]) - float(row_t1["weighted_avg_coupon"])) * 100.0):.4f}',
         )
 
         st.subheader('Monthly View Metrics (T1 vs T2)')
-        st.dataframe(
-            _styled_numeric_table(
-                _dual_view_metric_table(row_t1, row_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}')
-            ),
-            use_container_width=True,
-        )
+        metrics_table = _dual_view_metric_table(row_t1, row_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}')
+        st.dataframe(style_numeric_table(metrics_table), use_container_width=True)
 
-        st.subheader('Daily Interest (Previous Calendar Month)')
+    with daily_tab:
+        st.caption('Legend semantics: Existing = carried-in active deals; Added = deals starting in selected month; Matured = run-off effect shown separately.')
         daily_t1 = _compute_daily_interest(deals_df, t1)
         daily_t2 = _compute_daily_interest(deals_df, t2)
         render_daily_interest_chart(daily_t1, daily_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}')
 
-        st.subheader('Runoff Comparison')
+    with runoff_tab:
         runoff_delta = compute_runoff_delta_attribution(deals_df, t1, t2)
-        runoff_mode_options = ['Aligned Buckets (Remaining Maturity)', 'Calendar Months']
-        runoff_mode = _stable_radio(
-            label='Runoff Display Mode',
-            options=runoff_mode_options,
-            key='runoff_display_mode',
-            default=runoff_mode_options[0],
-            horizontal=True,
-        )
-        growth_mode = _stable_radio(
-            label='Growth mode',
-            options=['constant', 'user_defined'],
-            key='runoff_growth_mode',
-            default='constant',
-            horizontal=True,
-        )
-        growth_monthly_value = float(st.session_state.get('runoff_growth_monthly_value', 0.0))
-        if growth_mode == 'user_defined':
-            growth_monthly_value = float(
-                st.number_input(
-                    'User-defined monthly growth (EUR)',
-                    min_value=0.0,
-                    value=growth_monthly_value,
-                    step=1000000.0,
-                    format='%.2f',
-                    key='runoff_growth_monthly_value',
-                )
-            )
-        st.caption('Switch between aligned maturity buckets and calendar-month aggregation over the same 240-month horizon.')
+        runoff_ui = render_runoff_controls(default_basis=ui['runoff_decomposition_basis'])
+        full_ui = {**ui, **runoff_ui}
 
-        if runoff_mode == 'Aligned Buckets (Remaining Maturity)':
-            render_runoff_delta_charts(
+        if ui['runoff_display_mode'] == 'Aligned Buckets (Remaining Maturity)':
+            selected_view = render_runoff_delta_charts(
                 runoff_delta,
                 key_prefix='runoff_aligned',
                 deals_df=deals_df,
@@ -430,21 +415,22 @@ def main() -> None:
                 basis_t2=t2,
                 refill_logic_df=refill_logic_df,
                 curve_df=curve_df,
-                growth_mode=growth_mode,
-                monthly_growth_amount=growth_monthly_value,
+                ui_state=full_ui,
             )
-            st.dataframe(_styled_numeric_table(_build_runoff_bucket_table(runoff_delta, t1, t2)), use_container_width=True)
+            bucket_table = _build_runoff_bucket_table(runoff_delta, t1, t2)
+            bucket_table = _filter_runoff_bucket_table_by_view(bucket_table, selected_view)
+            st.dataframe(style_numeric_table(bucket_table), use_container_width=True)
         else:
-            calendar_runoff = compute_calendar_month_runoff_view(runoff_delta, t1, t2, deals_df=deals_df)
-            basis = st.session_state.get('runoff_decomposition_basis', 'T2')
+            basis = ui['runoff_decomposition_basis']
             anchor = pd.Timestamp(t1 if basis == 'T1' else t2) + pd.offsets.MonthEnd(0)
             timeframe_end = anchor + pd.offsets.MonthEnd(240)
+            calendar_runoff = compute_calendar_month_runoff_view(runoff_delta, t1, t2, deals_df=deals_df)
             filtered = calendar_runoff[
                 (calendar_runoff['calendar_month_end'] >= anchor)
                 & (calendar_runoff['calendar_month_end'] <= timeframe_end)
             ].copy()
 
-            render_calendar_runoff_charts(
+            selected_view = render_calendar_runoff_charts(
                 filtered,
                 label_t1=f'T1 {t1.date()}',
                 label_t2=f'T2 {t2.date()}',
@@ -455,17 +441,15 @@ def main() -> None:
                 basis_t2=t2,
                 refill_logic_df=refill_logic_df,
                 curve_df=curve_df,
-                growth_mode=growth_mode,
-                monthly_growth_amount=growth_monthly_value,
+                ui_state=full_ui,
             )
-            st.dataframe(_styled_numeric_table(_build_runoff_calendar_table(filtered, t1, t2)), use_container_width=True)
+            calendar_table = _build_runoff_calendar_table(filtered, t1, t2)
+            calendar_table = _filter_runoff_calendar_table_by_view(calendar_table, selected_view)
+            st.dataframe(style_numeric_table(calendar_table), use_container_width=True)
 
-        with st.expander('Deal-Level Differences', expanded=False):
-            diff = compare_month_ends(deals_df, t1, t2)
-            render_deal_diff_tables(diff)
-    else:
-        render_summary_cards(realized_nii, active_count_t1, accrued_t1, title=f'Metrics at {t1.date()}')
-        st.info('Enable `Monthly View 2 (T2)` to see the concise comparison dashboard.')
+    with diff_tab:
+        diff = compare_month_ends(deals_df, t1, t2)
+        render_deal_diff_tables(diff, compact_mode=True)
 
 
 if __name__ == '__main__':

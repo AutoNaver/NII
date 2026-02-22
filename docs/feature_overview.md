@@ -1,62 +1,60 @@
 # Feature Overview
 
-This document tracks feature status for the NII Dashboard and acts as the canonical snapshot of:
-- Final target capabilities
-- What is implemented
-- What is still pending
-- Where to request new features
+This is the canonical feature-status document for the NII dashboard.
 
 ## Status Legend
-- `Implemented`: Available in current codebase
-- `Planned`: Confirmed target, not fully delivered yet
-- `Backlog`: Candidate enhancement, not scheduled
+- `Implemented`: available in the current codebase
+- `Planned`: agreed target, not fully delivered
+- `Backlog`: candidate enhancement, not scheduled
 
 ## Core Feature Status
 
 | Area | Feature | Status | Notes |
 |---|---|---|---|
-| Data | Excel loader with sheet mapping and column normalization | Implemented | Uses `Input.xlsx` with `Deal_Data` and `Interest_Curve` |
-| Data | Validation for required columns and datatypes | Implemented | Hard fails for malformed schema; logs warnings for suspicious data |
-| Data | Invalid lifecycle handling (`maturity_date <= value_date`) | Implemented | Invalid rows are excluded with warnings |
-| Calculations | 30/360 day-count | Implemented | Shared utility used by accrual and NII logic |
-| Calculations | Active-deal rule (`value_date <= t < maturity_date`) | Implemented | Used across snapshots and comparisons |
-| Calculations | Fixed-rate accrued interest (EUR) | Implemented | Sign follows notional |
-| Calculations | Monthly realized NII (EUR) | Implemented | Overlap-based monthly accrual aggregation |
-| Calculations | Monthly buckets (notional, weighted coupon, interest paid) | Implemented | Includes active deal count |
-| Dashboard | End-of-month view | Implemented | KPI cards + monthly tables/charts |
-| Dashboard | Comparison mode (T1 vs T2) | Implemented | Deltas for NII, active deals, accrued interest, volume, coupon |
-| Dashboard | Deal-level differences (added/matured/changed) | Implemented | Includes consolidated highlighted change view |
-| Dashboard | EUR-first display | Implemented | Interest shown as currency amounts |
-| Dashboard | Table-first monthly buckets (notional/coupon/interest) | Implemented | Weighted coupon shown in percentage points; interest shown as EUR (30/360) |
-| Dashboard | Monthly runoff cohort view (month-offset roll-down) | Implemented | Month 0 starts with full active cohort and runs off by maturity |
-| Dashboard | Monthly bucket and runoff delta tables for T1 vs T2 | Implemented | Tables provide exact reconciliation next to charts |
-| Dashboard | Activity graphs (active vs added deals, active vs added notional*coupon) | Implemented | Monthly bucket activity diagnostics |
-| Testing | Unit tests for day-count, accrual, activation, NII, loader | Implemented | Pytest suite in `tests/` |
+| Data | Excel loader with schema normalization | Implemented | Uses `Input.xlsx` with `Deal_Data` and `Interest_Curve` |
+| Data | Validation for required columns and types | Implemented | Hard-fails malformed schema; warns on suspicious values |
+| Data | Invalid lifecycle handling (`maturity_date <= value_date`) | Implemented | Invalid rows excluded with warnings |
+| Calculations | Active-deal rule (`value_date <= t < maturity_date`) | Implemented | Used consistently in snapshots and decompositions |
+| Calculations | 30/360 day-count and accrual | Implemented | Shared across monthly and daily logic |
+| Calculations | Monthly realized NII (EUR) | Implemented | Overlap-based monthly accrual |
+| Calculations | Monthly buckets (notional, weighted coupon, interest, deal count) | Implemented | Includes signed/absolute handling where relevant |
+| Calculations | Runoff delta attribution (existing/added/matured) | Implemented | Available for aligned bucket and calendar views |
+| Calculations | Refill logic with tenor-based curve remuneration | Implemented | Interpolates `Interest_Curve` by tenor and basis date |
+| Calculations | Growth mode (`constant` / `user_defined`) | Implemented | Growth deals follow refill remuneration mechanics |
+| Dashboard | Monthly comparison mode (`T1` vs `T2`) | Implemented | Delta cards + compact metrics table |
+| Dashboard | Daily decomposition charts (interest/notional) | Implemented | View toggle for `T1`/`T2` and chart type |
+| Dashboard | Runoff display mode toggle | Implemented | `Aligned Buckets` and `Calendar Months` |
+| Dashboard | Runoff chart-view toggle | Implemented | Notional, effective interest, contribution, deals, cumulative, refill/growth |
+| Dashboard | Runoff 5Y aggregation table with split selector | Implemented | `Next 5 Years` (`Y1..Y5`) or `5 Calendar Years` (year-by-year) |
+| Dashboard | Deal-level difference tables | Implemented | Consolidated + category tables |
+| Dashboard | Number formatting (thousand separators) | Implemented | Applied across major tables and chart axes |
+| Dashboard | Clarity-first UI refresh (sidebar controls + tabs + compact runoff workflow) | Implemented | Global controls consolidated; chart/table pairing improved; aggregation collapsed by default |
+| Testing | Unit tests for accrual, loader, runoff, refill curve, growth | Implemented | Pytest suite in `tests/` |
 
-## Planned Features (Next)
+## Planned Features
 
 | Area | Feature | Status | Notes |
 |---|---|---|---|
-| Rates | True floating-rate support (`coupon_type`, `index`, `spread`) | Planned | Current input is fixed-only; curve interfaces already exist |
-| Dashboard | Better metric formatting and UX polish | Planned | Improve readability for large portfolios |
-| Ops | CI workflow for automated pytest checks | Planned | Tests run locally; CI config not added yet |
+| Rates | True floating-rate support (`coupon_type`, `index`, `spread`) | Planned | Current pipeline is fixed-rate |
+| Ops | CI workflow for automated pytest checks | Planned | Local tests available; CI not yet added |
+| UX | Pinned comparison presets in session | Planned | Save/restore `T1/T2` and view-mode preferences |
+| UX | Quick horizon jump controls (`Y1`, `Y2`, `2025`, `2026`) | Planned | Faster navigation in runoff aggregation |
+| Reporting | Export visible table to CSV | Planned | Export only what user currently sees |
+| Data | Data health ribbon (rows loaded/filtered) | Planned | Lightweight data-quality visibility in UI |
 
 ## Backlog / Future Extensions
 
 | Area | Feature | Status | Notes |
 |---|---|---|---|
 | Analytics | Forward-looking NII projections | Backlog | Scenario-ready projection engine |
-| Analytics | Rate shock / scenario analysis | Backlog | Parallel runs across curve scenarios |
-| UX | Deal-level drill-down pages | Backlog | Per-deal timeline and contribution detail |
-| Reporting | Export to Excel/PDF | Backlog | Downloadable artifacts for stakeholders |
+| Analytics | Rate-shock / scenario analysis | Backlog | Multi-curve runs |
+| UX | Deal-level drill-down pages | Backlog | Per-deal lifecycle and contribution views |
+| Reporting | Export to Excel/PDF | Backlog | Downloadable reporting artifacts |
 
 ## Add a Feature Request
 
-Developers should add new requests in:
-- `docs/feature_requests.md`
+Add requests in `docs/feature_requests.md` using the template there:
+1. Add a new `FR-###` row in Open Requests.
+2. Set status to `Proposed`.
+3. Link rationale/PR when implemented.
 
-Process:
-1. Add a new row in the **Open Requests** table using the template there.
-2. Assign a unique request ID (`FR-###`).
-3. Set initial status to `Proposed`.
-4. Open a PR with the request update and rationale.

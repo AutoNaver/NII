@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from src.calculations.accrual import accrued_interest_eur, accrued_interest_for_overlap
+from src.dashboard.components.controls import coerce_option
+from src.dashboard.components.formatting import plot_axis_number_format, style_numeric_table
 
 
 def _series_range(series_list: list[pd.Series]) -> tuple[float, float]:
@@ -25,22 +29,6 @@ def _series_range(series_list: list[pd.Series]) -> tuple[float, float]:
         pad = abs(lo) * 0.1
         return (lo - pad, hi + pad)
     return (lo, hi)
-
-
-def _styled_numeric_table(df: pd.DataFrame) -> pd.io.formats.style.Styler | pd.DataFrame:
-    if df.empty:
-        return df
-    fmt: dict[str, str] = {}
-    for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col]):
-            name = str(col).lower()
-            if 'count' in name:
-                fmt[col] = '{:,.0f}'
-            else:
-                fmt[col] = '{:,.2f}'
-    if not fmt:
-        return df
-    return df.style.format(fmt, na_rep='-')
 
 
 def _aligned_secondary_range(
@@ -72,23 +60,7 @@ def _aligned_secondary_range(
     return (-a, k * a)
 
 
-def _stable_radio(
-    *,
-    label: str,
-    options: list[str],
-    key: str,
-    default: str,
-    horizontal: bool = True,
-) -> str:
-    current = st.session_state.get(key, default)
-    if current not in options:
-        current = default if default in options else options[0]
-        st.session_state[key] = current
-    idx = options.index(current)
-    return st.radio(label, options=options, index=idx, horizontal=horizontal, key=key)
-
-
-def _render_with_toggle(
+def _render_selected_chart(
     *,
     fig_notional: go.Figure,
     fig_cumulative: go.Figure,
@@ -97,26 +69,22 @@ def _render_with_toggle(
     fig_deal_count: go.Figure,
     fig_refill_effective: go.Figure | None,
     fig_refill_cumulative: go.Figure | None,
+    chart_view: str,
     key_prefix: str,
-) -> None:
-    options = [
-            'Notional Decomposition',
-            'Effective Interest Decomposition',
-            'Effective Interest Contribution',
-            'Deal Count Decomposition',
-            'Cumulative Notional',
+) -> str:
+    available_options = [
+        'Notional Decomposition',
+        'Effective Interest Decomposition',
+        'Effective Interest Contribution',
+        'Deal Count Decomposition',
+        'Cumulative Notional',
     ]
     if fig_refill_effective is not None:
-        options.append('Effective Interest Decomposition (Refill/Growth)')
+        available_options.append('Effective Interest Decomposition (Refill/Growth)')
     if fig_refill_cumulative is not None:
-        options.append('Cumulative Notional (Refill/Growth)')
-    option = _stable_radio(
-        label='Runoff chart view',
-        options=options,
-        key='runoff_chart_view',
-        default=options[0],
-        horizontal=True,
-    )
+        available_options.append('Cumulative Notional (Refill/Growth)')
+
+    option = coerce_option(chart_view, available_options, available_options[0])
     if option == 'Notional Decomposition':
         st.plotly_chart(fig_notional, use_container_width=True, key=f'{key_prefix}_notional')
     elif option == 'Effective Interest Decomposition':
@@ -131,6 +99,7 @@ def _render_with_toggle(
         st.plotly_chart(fig_refill_cumulative, use_container_width=True, key=f'{key_prefix}_refill_cumulative')
     else:
         st.plotly_chart(fig_cumulative, use_container_width=True, key=f'{key_prefix}_cumulative')
+    return option
 
 
 def _component_chart(
@@ -232,7 +201,10 @@ def _component_chart(
         )
     fig.update_layout(**layout_kwargs)
     fig.update_xaxes(title=x_label)
-    return fig
+    y_axes = ['yaxis']
+    if y_cumulative is not None:
+        y_axes.append('yaxis2')
+    return plot_axis_number_format(fig, y_axes=y_axes)
 
 
 def _effective_contribution_chart(
@@ -318,7 +290,10 @@ def _effective_contribution_chart(
             )
         )
     fig.update_xaxes(title=x_label)
-    return fig
+    y_axes = ['yaxis']
+    if y_cumulative is not None:
+        y_axes.append('yaxis2')
+    return plot_axis_number_format(fig, y_axes=y_axes)
 
 
 def _remaining_maturity_months(basis_date: pd.Timestamp, maturity_date: pd.Timestamp) -> int:
@@ -540,13 +515,17 @@ def _render_aggregation_table(
     effective_total: pd.Series,
     key_prefix: str,
 ) -> None:
-    st.markdown('**Runoff 5Y Aggregation**')
-    window_mode = _stable_radio(
+    horizon_options = ['Next 5 Years', '5 Calendar Years']
+    horizon_key = f'{key_prefix}_aggregation_horizon'
+    horizon_default = 'Next 5 Years'
+    horizon_current = coerce_option(st.session_state.get(horizon_key, horizon_default), horizon_options, horizon_default)
+    st.session_state[horizon_key] = horizon_current
+    window_mode = st.radio(
         label='Aggregation horizon',
-        options=['Next 5 Years', '5 Calendar Years'],
-        key=f'{key_prefix}_aggregation_horizon',
-        default='Next 5 Years',
+        options=horizon_options,
+        index=horizon_options.index(horizon_current),
         horizontal=True,
+        key=horizon_key,
     )
 
     windows = _build_aggregation_windows(month_ends, window_mode)
@@ -554,12 +533,16 @@ def _render_aggregation_table(
         st.info('No runoff points available for the selected aggregation horizon.')
         return
     split_options = [label for label, _ in windows]
-    split = _stable_radio(
+    split_key = f'{key_prefix}_aggregation_split'
+    split_default = split_options[0]
+    split_current = coerce_option(st.session_state.get(split_key, split_default), split_options, split_default)
+    st.session_state[split_key] = split_current
+    split = st.radio(
         label='Aggregation split',
         options=split_options,
-        key=f'{key_prefix}_aggregation_split',
-        default=split_options[0],
+        index=split_options.index(split_current),
         horizontal=True,
+        key=split_key,
     )
     masks = {label: mask for label, mask in windows}
     mask = masks[split]
@@ -591,7 +574,7 @@ def _render_aggregation_table(
         },
     ]
     table = pd.DataFrame(rows).set_index('Metric')
-    st.dataframe(_styled_numeric_table(table), use_container_width=True)
+    st.dataframe(style_numeric_table(table), use_container_width=True)
 
 
 def _bucketed_month_effective_contribution(
@@ -682,12 +665,11 @@ def render_runoff_delta_charts(
     basis_t2: pd.Timestamp | None = None,
     refill_logic_df: pd.DataFrame | None = None,
     curve_df: pd.DataFrame | None = None,
-    growth_mode: str = 'constant',
-    monthly_growth_amount: float = 0.0,
-) -> None:
+    ui_state: dict[str, Any] | None = None,
+) -> str:
     if compare_df.empty:
         st.info('No runoff data to display.')
-        return
+        return 'Notional Decomposition'
 
     # Focus range where there is activity
     mask = (
@@ -709,13 +691,11 @@ def render_runoff_delta_charts(
                 return active_df[col].astype(float)
         return pd.Series(0.0, index=active_df.index, dtype=float)
 
-    basis = _stable_radio(
-        label='Runoff decomposition basis',
-        options=['T1', 'T2'],
-        key='runoff_decomposition_basis',
-        default='T2',
-        horizontal=True,
-    )
+    ui_state = ui_state or {}
+    basis = str(ui_state.get('runoff_decomposition_basis', 'T2'))
+    growth_mode = str(ui_state.get('growth_mode', 'constant'))
+    monthly_growth_amount = float(ui_state.get('growth_monthly_value', 0.0))
+    chart_view = str(ui_state.get('runoff_chart_view', 'Notional Decomposition'))
 
     if basis == 'T1':
         notional_existing = _first_available(['signed_notional_d1', 'abs_notional_d1'])
@@ -926,7 +906,7 @@ def render_runoff_delta_charts(
             cumulative_label='Cumulative Abs Notional',
         )
 
-    _render_with_toggle(
+    selected_view = _render_selected_chart(
         fig_notional=fig_buckets,
         fig_cumulative=fig_totals,
         fig_notional_coupon=fig_nc,
@@ -934,6 +914,7 @@ def render_runoff_delta_charts(
         fig_deal_count=fig_deals,
         fig_refill_effective=fig_refill_effective,
         fig_refill_cumulative=fig_refill_cumulative,
+        chart_view=chart_view,
         key_prefix=key_prefix,
     )
 
@@ -950,22 +931,24 @@ def render_runoff_delta_charts(
     )
     notional_total_for_table = cum_notional_total + refill_required + growth_required
     effective_total_for_table = nc_total + refill_effective + growth_effective
-    _render_aggregation_table(
-        month_ends=month_ends,
-        notional_existing=cum_notional_existing,
-        notional_added=cum_notional_added,
-        notional_matured_effect=-cum_notional_matured,
-        notional_refilled=refill_required,
-        notional_growth=growth_required,
-        notional_total=notional_total_for_table,
-        effective_existing=nc_existing,
-        effective_added=nc_added,
-        effective_matured_effect=-nc_matured,
-        effective_refilled=refill_effective,
-        effective_growth=growth_effective,
-        effective_total=effective_total_for_table,
-        key_prefix=f'{key_prefix}_summary',
-    )
+    with st.expander('Runoff 5Y Aggregation', expanded=False):
+        _render_aggregation_table(
+            month_ends=month_ends,
+            notional_existing=cum_notional_existing,
+            notional_added=cum_notional_added,
+            notional_matured_effect=-cum_notional_matured,
+            notional_refilled=refill_required,
+            notional_growth=growth_required,
+            notional_total=notional_total_for_table,
+            effective_existing=nc_existing,
+            effective_added=nc_added,
+            effective_matured_effect=-nc_matured,
+            effective_refilled=refill_effective,
+            effective_growth=growth_effective,
+            effective_total=effective_total_for_table,
+            key_prefix=f'{key_prefix}_summary',
+        )
+    return selected_view
 
 
 def render_calendar_runoff_charts(
@@ -979,13 +962,12 @@ def render_calendar_runoff_charts(
     basis_t2: pd.Timestamp | None = None,
     refill_logic_df: pd.DataFrame | None = None,
     curve_df: pd.DataFrame | None = None,
-    growth_mode: str = 'constant',
-    monthly_growth_amount: float = 0.0,
-) -> None:
+    ui_state: dict[str, Any] | None = None,
+) -> str:
     """Render runoff charts using actual calendar month-end x-axis."""
     if calendar_df.empty:
         st.info('No calendar-month runoff data to display.')
-        return
+        return 'Notional Decomposition'
 
     df = calendar_df.sort_values('calendar_month_end').copy()
     x_vals = df['calendar_month_end'].dt.strftime('%Y-%m')
@@ -1001,14 +983,11 @@ def render_calendar_runoff_charts(
                 return df[col].astype(float)
         return pd.Series(0.0, index=df.index, dtype=float)
 
-    basis_options = ['T1', 'T2']
-    basis = _stable_radio(
-        label='Runoff decomposition basis',
-        options=basis_options,
-        key='runoff_decomposition_basis',
-        default='T2',
-        horizontal=True,
-    )
+    ui_state = ui_state or {}
+    basis = str(ui_state.get('runoff_decomposition_basis', 'T2'))
+    growth_mode = str(ui_state.get('growth_mode', 'constant'))
+    monthly_growth_amount = float(ui_state.get('growth_monthly_value', 0.0))
+    chart_view = str(ui_state.get('runoff_chart_view', 'Notional Decomposition'))
     is_t1_basis = basis == 'T1'
 
     if is_t1_basis:
@@ -1259,7 +1238,7 @@ def render_calendar_runoff_charts(
             cumulative_label='Cumulative Abs Notional',
         )
 
-    _render_with_toggle(
+    selected_view = _render_selected_chart(
         fig_notional=fig_buckets,
         fig_cumulative=fig_totals,
         fig_notional_coupon=fig_nc,
@@ -1267,24 +1246,27 @@ def render_calendar_runoff_charts(
         fig_deal_count=fig_deals,
         fig_refill_effective=fig_refill_effective,
         fig_refill_cumulative=fig_refill_cumulative,
+        chart_view=chart_view,
         key_prefix=key_prefix,
     )
 
     notional_total_for_table = cum_notional_total + refill_required + growth_required
     effective_total_for_table = nc_total + refill_effective + growth_effective
-    _render_aggregation_table(
-        month_ends=df['calendar_month_end'],
-        notional_existing=cum_notional_existing,
-        notional_added=cum_notional_added,
-        notional_matured_effect=-cum_notional_matured,
-        notional_refilled=refill_required,
-        notional_growth=growth_required,
-        notional_total=notional_total_for_table,
-        effective_existing=nc_existing,
-        effective_added=nc_added,
-        effective_matured_effect=-nc_matured,
-        effective_refilled=refill_effective,
-        effective_growth=growth_effective,
-        effective_total=effective_total_for_table,
-        key_prefix=f'{key_prefix}_summary',
-    )
+    with st.expander('Runoff 5Y Aggregation', expanded=False):
+        _render_aggregation_table(
+            month_ends=df['calendar_month_end'],
+            notional_existing=cum_notional_existing,
+            notional_added=cum_notional_added,
+            notional_matured_effect=-cum_notional_matured,
+            notional_refilled=refill_required,
+            notional_growth=growth_required,
+            notional_total=notional_total_for_table,
+            effective_existing=nc_existing,
+            effective_added=nc_added,
+            effective_matured_effect=-nc_matured,
+            effective_refilled=refill_effective,
+            effective_growth=growth_effective,
+            effective_total=effective_total_for_table,
+            key_prefix=f'{key_prefix}_summary',
+        )
+    return selected_view

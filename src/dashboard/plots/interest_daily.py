@@ -7,6 +7,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+from src.dashboard.components.controls import coerce_option
+from src.dashboard.components.formatting import plot_axis_number_format
+
 
 def _series_range(series_list: list[pd.Series]) -> tuple[float, float]:
     valid = [s.astype(float).dropna() for s in series_list if s is not None]
@@ -52,22 +55,6 @@ def _aligned_secondary_range(
     if a == 0.0:
         a = 1.0
     return (-a, k * a)
-
-
-def _stable_radio(
-    *,
-    label: str,
-    options: list[str],
-    key: str,
-    default: str,
-    horizontal: bool = True,
-) -> str:
-    current = st.session_state.get(key, default)
-    if current not in options:
-        current = default if default in options else options[0]
-        st.session_state[key] = current
-    idx = options.index(current)
-    return st.radio(label, options=options, index=idx, horizontal=horizontal, key=key)
 
 
 def _plot_daily_metric(
@@ -155,7 +142,7 @@ def _plot_daily_metric(
         y=df[total_col],
         mode='lines+markers',
         name='Total',
-        line=dict(color='#00e5ff', width=2),
+        line=dict(color='#00e5ff', width=3),
         row=1,
         col=1,
         secondary_y=False,
@@ -226,6 +213,10 @@ def _plot_daily_metric(
         row=2,
         col=1,
     )
+    y_axes = ['yaxis', 'yaxis3']
+    if include_cumulative:
+        y_axes.extend(['yaxis2', 'yaxis4'])
+    fig = plot_axis_number_format(fig, y_axes=y_axes)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -239,20 +230,26 @@ def render_daily_interest_chart(daily_t1: pd.DataFrame, daily_t2: pd.DataFrame, 
         st.info('No daily interest data available.')
         return
 
-    option = _stable_radio(
+    view_key = 'daily_view_date'
+    option_current = coerce_option(st.session_state.get(view_key, options[0]), options, options[0])
+    st.session_state[view_key] = option_current
+    option = st.radio(
         label='Daily view',
         options=options,
-        key='daily_view_date',
-        default=options[0],
+        index=options.index(option_current),
         horizontal=True,
+        key=view_key,
     )
     chart_options = ['Daily Interest Decomposition', 'Daily Notional Decomposition']
-    chart_view = _stable_radio(
+    chart_key = 'daily_chart_view'
+    chart_current = coerce_option(st.session_state.get(chart_key, chart_options[0]), chart_options, chart_options[0])
+    st.session_state[chart_key] = chart_current
+    chart_view = st.radio(
         label='Daily chart view',
         options=chart_options,
-        key='daily_chart_view',
-        default=chart_options[0],
+        index=chart_options.index(chart_current),
         horizontal=True,
+        key=chart_key,
     )
     selected_df = daily_t1 if option == label_t1 else daily_t2
 

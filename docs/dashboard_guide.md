@@ -1,49 +1,78 @@
-﻿# Dashboard Guide
+# Dashboard Guide
 
 ## Run
 ```bash
 streamlit run src/dashboard/app.py
 ```
 
-## Inputs
-- Workbook path (default: `Input.xlsx`)
-- Monthly View 1 month-end (T1)
-- Monthly View 2 month-end (T2, optional)
-- Month-end exclusion filter for comparison views
-- Runoff mode toggle: `Absolute Remaining` or `Delta Attribution`
+## Terminology
+- `Monthly View`: selected month-end comparison dates (`T1`, `T2`)
+- `Bucket`: remaining maturity bucket within a selected monthly view
+
+## Layout
+
+### Sidebar (global controls)
+- Workbook path (default `Input.xlsx`)
+- Monthly View 1 (`T1`)
+- Monthly View 2 (`T2`) toggle + selector
+- Runoff display mode:
+  - `Aligned Buckets (Remaining Maturity)`
+  - `Calendar Months`
+- Runoff decomposition basis (`T1` / `T2`)
+- Growth mode:
+  - `constant`
+  - `user_defined` (shows monthly EUR growth input)
+
+### Main tabs
+- `Overview`
+- `Daily`
+- `Runoff`
+- `Deal Differences`
 
 ## Default Opening State
-- T1 defaults to the first available valuation month-end.
-- T2 defaults to the month-end immediately after T1 (if available).
+- `T1` defaults to the first available month-end.
+- `T2` defaults to the next available month-end (if present).
 
-## Outputs
-- KPI cards (previous-month realized NII, active deals, accrued interest)
-- Active deals table at T1 (and T2 in comparison mode)
-- Monthly bucket tables for:
-  - total active notional
-  - weighted average coupon (percentage points)
-  - interest paid EUR (30/360)
-- Deal-level difference tables in comparison mode
-- Consolidated highlighted deal-change table in comparison mode
-- Monthly runoff profile (cohort view) with month-offset roll-off
-- Monthly bucket difference table for T1 vs T2 (calendar aligned deltas)
-- Month-end filter control to hide selected months from comparison chart/table
-- Single combined runoff comparison bar chart for T1 vs T2
-- Delta attribution mode for runoff showing contributions from added deals and maturities
-- Deal activity graph: active deals vs added deals by month bucket
-- Notional*coupon activity graph: active vs added by month bucket
+## Tab Behavior
 
-## Visualization Guidance
-- Terminology:
-  - `Buckets` = remaining maturity buckets
-  - `Monthly View` = comparison date selections (T1/T2)
-- Use charts to detect trend/shape quickly:
-  - Runoff bars by remaining maturity buckets
-  - Added vs matured attribution in runoff delta mode
-- Use tables for exact reconciliation:
-  - Monthly view deltas shown in transposed format
-  - Runoff comparison deltas by remaining maturity buckets (transposed)
+### Overview
+- With `T2` enabled:
+  - delta KPI row (`T2 - T1`)
+  - compact metrics table (`T1`, `T2`, `Delta`)
+- With `T2` disabled:
+  - compact single-view summary cards
+  - hint to enable comparison mode
+
+### Daily
+- Available in comparison mode.
+- Toggles:
+  - date view (`T1` or `T2`)
+  - chart view (`Daily Interest Decomposition` / `Daily Notional Decomposition`)
+- Semantics:
+  - `Existing`: active carry-in deals
+  - `Added`: deals starting during selected calendar month
+  - `Matured`: run-off effect shown separately
+
+### Runoff
+- Compact controls above chart include runoff chart view selection.
+- Exactly one chart is shown at a time.
+- Exactly one related table is shown below the chart (aligned to selected chart view).
+- Optional refill/growth views are shown only when `refill_logic` exists.
+- `Runoff 5Y Aggregation` is collapsed by default and includes:
+  - horizon toggle: `Next 5 Years` or `5 Calendar Years`
+  - split toggle:
+    - `Y1..Y5` for `Next 5 Years`
+    - explicit years (`2025`, `2026`, ...) for `5 Calendar Years`
+
+### Deal Differences
+- Consolidated change table shown first.
+- Detailed categories are in nested expanders:
+  - Added Deals
+  - Matured/Removed Deals
+  - Notional Changes
+  - Coupon Changes
 
 ## Notes
-- Current implementation is fixed-rate only.
-- Interest amounts are shown in EUR.
+- Current implementation is fixed-rate.
+- Interest is reported in EUR with 30/360 conventions.
+- If `refill_logic` is not present in the workbook, refill/growth chart options are hidden automatically.
