@@ -13,6 +13,7 @@ streamlit run src/dashboard/app.py
 
 ### Sidebar (global controls)
 - Workbook path (default `Input.xlsx`)
+- `Refresh Cached Calculations` button (clears Streamlit data cache and reloads computed datasets)
 - Monthly View 1 (`T1`)
 - Monthly View 2 (`T2`) toggle + selector
 - Runoff display mode:
@@ -32,6 +33,7 @@ streamlit run src/dashboard/app.py
 ## Default Opening State
 - `T1` defaults to the first available month-end.
 - `T2` defaults to the next available month-end (if present).
+- `Runoff Display Mode` defaults to `Calendar Months` for new sessions.
 
 ## Tab Behavior
 
@@ -49,9 +51,11 @@ streamlit run src/dashboard/app.py
   - date view (`T1` or `T2`)
   - chart view (`Daily Interest Decomposition` / `Daily Notional Decomposition`)
 - Semantics:
-  - `Existing`: active carry-in deals
-  - `Added`: deals starting during selected calendar month
-  - `Matured`: run-off effect shown separately
+  - Top panel: stacked-style `Total` bar (`Month Start Base` + shaded `Delta vs first day`, green up/red down)
+  - Interest view top panel also overlays `Cumulative Total` on a secondary y-axis
+  - Bottom panel: `Added` and `Matured` breakdown
+  - Interest chart bottom panel overlays cumulative lines for `Added`, `Matured`, and `Added + Matured`
+  - Interest chart includes a month-end cumulative decomposition summary table below the chart
 
 ### Runoff
 - Compact controls above chart include runoff chart view selection.
@@ -76,3 +80,4 @@ streamlit run src/dashboard/app.py
 - Current implementation is fixed-rate.
 - Interest is reported in EUR with 30/360 conventions.
 - If `refill_logic` is not present in the workbook, refill/growth chart options are hidden automatically.
+- Cache refresh is manual: if workbook contents change at the same file path, click `Refresh Cached Calculations`.

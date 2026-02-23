@@ -1,6 +1,11 @@
 import pandas as pd
 
-from src.dashboard.components.controls import coerce_option, default_month_view_indices
+from src.dashboard.components.controls import (
+    DEFAULT_RUNOFF_DISPLAY_MODE,
+    RUNOFF_DISPLAY_OPTIONS,
+    coerce_option,
+    default_month_view_indices,
+)
 
 
 def test_coerce_option_prefers_existing_value() -> None:
@@ -20,3 +25,8 @@ def test_default_month_view_indices() -> None:
     assert default_month_view_indices(list(idx)) == (0, 0)
     idx2 = pd.to_datetime(['2025-01-31', '2025-02-28'])
     assert default_month_view_indices(list(idx2)) == (0, 1)
+
+
+def test_default_runoff_display_mode_is_calendar_months() -> None:
+    assert DEFAULT_RUNOFF_DISPLAY_MODE == 'Calendar Months'
+    assert DEFAULT_RUNOFF_DISPLAY_MODE in RUNOFF_DISPLAY_OPTIONS

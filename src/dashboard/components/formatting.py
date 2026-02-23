@@ -58,4 +58,23 @@ def plot_axis_number_format(fig: go.Figure, *, y_axes: list[str]) -> go.Figure:
         if axis is None:
             continue
         axis.separatethousands = True
+    return apply_plot_layout_hygiene(fig)
+
+
+def apply_plot_layout_hygiene(fig: go.Figure) -> go.Figure:
+    """Apply consistent spacing so legends and axis titles do not overlap."""
+    fig.update_layout(
+        margin=dict(t=96, r=88, b=122, l=88),
+        legend=dict(
+            orientation='h',
+            yanchor='top',
+            y=-0.24,
+            xanchor='left',
+            x=0.0,
+            bgcolor='rgba(0,0,0,0)',
+            tracegroupgap=8,
+        ),
+    )
+    fig.update_xaxes(automargin=True, title_standoff=14)
+    fig.update_yaxes(automargin=True, title_standoff=12)
     return fig

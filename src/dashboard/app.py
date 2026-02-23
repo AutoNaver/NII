@@ -55,6 +55,38 @@ def _load_refill_logic(path: str) -> pd.DataFrame | None:
         return None
 
 
+@st.cache_data
+def _cached_monthly_buckets(path: str, month_end: pd.Timestamp) -> pd.DataFrame:
+    deals_df, _ = _load(path)
+    return compute_monthly_buckets(deals_df, pd.Timestamp(month_end))
+
+
+@st.cache_data
+def _cached_daily_interest(path: str, month_end: pd.Timestamp) -> pd.DataFrame:
+    deals_df, _ = _load(path)
+    return _compute_daily_interest(deals_df, pd.Timestamp(month_end))
+
+
+@st.cache_data
+def _cached_compare_month_ends(path: str, d1: pd.Timestamp, d2: pd.Timestamp) -> dict[str, pd.DataFrame | float]:
+    deals_df, _ = _load(path)
+    return compare_month_ends(deals_df, pd.Timestamp(d1), pd.Timestamp(d2))
+
+
+@st.cache_data
+def _cached_runoff_delta(path: str, d1: pd.Timestamp, d2: pd.Timestamp) -> pd.DataFrame:
+    deals_df, _ = _load(path)
+    return compute_runoff_delta_attribution(deals_df, pd.Timestamp(d1), pd.Timestamp(d2))
+
+
+@st.cache_data
+def _cached_calendar_runoff(path: str, d1: pd.Timestamp, d2: pd.Timestamp, include_effective: bool) -> pd.DataFrame:
+    deals_df, _ = _load(path)
+    runoff_delta = _cached_runoff_delta(path, pd.Timestamp(d1), pd.Timestamp(d2))
+    effective_deals_df = deals_df if include_effective else None
+    return compute_calendar_month_runoff_view(runoff_delta, pd.Timestamp(d1), pd.Timestamp(d2), deals_df=effective_deals_df)
+
+
 def _available_month_ends(deals_df: pd.DataFrame) -> list[pd.Timestamp]:
     start = deals_df['value_date'].min()
     end = deals_df['maturity_date'].max() - pd.Timedelta(days=1)
@@ -353,7 +385,7 @@ def main() -> None:
     active_t1 = active_deals_snapshot(deals_df, t1)
     active_count_t1 = int(len(active_t1))
     accrued_t1 = accrued_interest_to_date(deals_df, t1)
-    monthly_t1 = compute_monthly_buckets(deals_df, t1)
+    monthly_t1 = _cached_monthly_buckets(input_path, t1)
     row_t1 = monthly_t1[monthly_t1['month_end'] == t1].iloc[0]
 
     if t2 is None:
@@ -373,7 +405,7 @@ def main() -> None:
     active_t2 = active_deals_snapshot(deals_df, t2)
     active_count_t2 = int(len(active_t2))
     accrued_t2 = accrued_interest_to_date(deals_df, t2)
-    monthly_t2 = compute_monthly_buckets(deals_df, t2)
+    monthly_t2 = _cached_monthly_buckets(input_path, t2)
     row_t2 = monthly_t2[monthly_t2['month_end'] == t2].iloc[0]
 
     with overview_tab:
@@ -396,17 +428,22 @@ def main() -> None:
         st.dataframe(style_numeric_table(metrics_table), use_container_width=True)
 
     with daily_tab:
-        st.caption('Legend semantics: Existing = carried-in active deals; Added = deals starting in selected month; Matured = run-off effect shown separately.')
-        daily_t1 = _compute_daily_interest(deals_df, t1)
-        daily_t2 = _compute_daily_interest(deals_df, t2)
+        st.caption(
+            'Top chart uses a stacked-style total bar: month-start base plus shaded delta versus first day (green up, red down). '
+            'Interest view also overlays cumulative Total in the top chart. '
+            'Bottom chart shows Added and Matured breakdown plus cumulative Added+Matured and cumulative Added/Matured lines '
+            'and includes a month-end cumulative decomposition summary table below.'
+        )
+        daily_t1 = _cached_daily_interest(input_path, t1)
+        daily_t2 = _cached_daily_interest(input_path, t2)
         render_daily_interest_chart(daily_t1, daily_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}')
 
     with runoff_tab:
-        runoff_delta = compute_runoff_delta_attribution(deals_df, t1, t2)
         runoff_ui = render_runoff_controls(default_basis=ui['runoff_decomposition_basis'])
         full_ui = {**ui, **runoff_ui}
 
         if ui['runoff_display_mode'] == 'Aligned Buckets (Remaining Maturity)':
+            runoff_delta = _cached_runoff_delta(input_path, t1, t2)
             selected_view = render_runoff_delta_charts(
                 runoff_delta,
                 key_prefix='runoff_aligned',
@@ -424,7 +461,8 @@ def main() -> None:
             basis = ui['runoff_decomposition_basis']
             anchor = pd.Timestamp(t1 if basis == 'T1' else t2) + pd.offsets.MonthEnd(0)
             timeframe_end = anchor + pd.offsets.MonthEnd(240)
-            calendar_runoff = compute_calendar_month_runoff_view(runoff_delta, t1, t2, deals_df=deals_df)
+            needs_effective = 'Effective Interest' in str(full_ui.get('runoff_chart_view', ''))
+            calendar_runoff = _cached_calendar_runoff(input_path, t1, t2, needs_effective)
             filtered = calendar_runoff[
                 (calendar_runoff['calendar_month_end'] >= anchor)
                 & (calendar_runoff['calendar_month_end'] <= timeframe_end)
@@ -435,7 +473,7 @@ def main() -> None:
                 label_t1=f'T1 {t1.date()}',
                 label_t2=f'T2 {t2.date()}',
                 key_prefix='runoff_calendar',
-                runoff_compare_df=runoff_delta,
+                runoff_compare_df=None,
                 deals_df=deals_df,
                 basis_t1=t1,
                 basis_t2=t2,
@@ -448,7 +486,7 @@ def main() -> None:
             st.dataframe(style_numeric_table(calendar_table), use_container_width=True)
 
     with diff_tab:
-        diff = compare_month_ends(deals_df, t1, t2)
+        diff = _cached_compare_month_ends(input_path, t1, t2)
         render_deal_diff_tables(diff, compact_mode=True)
 
 

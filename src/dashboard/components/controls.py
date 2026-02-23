@@ -7,6 +7,9 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+RUNOFF_DISPLAY_OPTIONS = ['Aligned Buckets (Remaining Maturity)', 'Calendar Months']
+DEFAULT_RUNOFF_DISPLAY_MODE = 'Calendar Months'
+
 
 def coerce_option(current: Any, options: list[Any], default: Any) -> Any:
     """Return a stable option value that is guaranteed to be in options."""
@@ -67,6 +70,9 @@ def render_global_controls(month_ends: list[pd.Timestamp]) -> dict[str, Any]:
     with st.sidebar:
         st.subheader('Controls')
         input_path = st.text_input('Workbook path', value=st.session_state.get('global_input_path', 'Input.xlsx'), key='global_input_path')
+        if st.button('Refresh Cached Calculations', key='global_refresh_cached_calculations'):
+            st.cache_data.clear()
+            st.rerun()
 
         if month_ends:
             t1 = _stable_selectbox(
@@ -94,9 +100,9 @@ def render_global_controls(month_ends: list[pd.Timestamp]) -> dict[str, Any]:
 
         runoff_display_mode = _stable_radio(
             label='Runoff Display Mode',
-            options=['Aligned Buckets (Remaining Maturity)', 'Calendar Months'],
+            options=RUNOFF_DISPLAY_OPTIONS,
             key='runoff_display_mode',
-            default='Aligned Buckets (Remaining Maturity)',
+            default=DEFAULT_RUNOFF_DISPLAY_MODE,
             horizontal=False,
         )
         runoff_decomposition_basis = _stable_radio(
@@ -173,4 +179,3 @@ def render_runoff_controls(default_basis: str = 'T2') -> dict[str, Any]:
         'runoff_chart_view': runoff_chart_view,
         'runoff_decomposition_basis': st.session_state.get('runoff_decomposition_basis', default_basis),
     }
-

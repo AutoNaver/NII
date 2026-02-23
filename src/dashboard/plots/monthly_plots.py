@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from src.dashboard.components.formatting import apply_plot_layout_hygiene
 
 def render_deal_count_activity(activity_df: pd.DataFrame, title: str) -> None:
     """Render active and added deal counts by month bucket."""
@@ -27,6 +28,7 @@ def render_deal_count_activity(activity_df: pd.DataFrame, title: str) -> None:
     )
     fig.update_layout(title=title, barmode='group')
     fig.update_yaxes(title='Deal Count')
+    fig = apply_plot_layout_hygiene(fig)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -50,4 +52,5 @@ def render_notional_coupon_activity(activity_df: pd.DataFrame, title: str) -> No
     )
     fig.update_layout(title=title, barmode='group')
     fig.update_yaxes(title='Notional * Coupon')
+    fig = apply_plot_layout_hygiene(fig)
     st.plotly_chart(fig, use_container_width=True)

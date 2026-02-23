@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.calculations.accrual import accrued_interest_for_overlap, is_active
+from src.calculations.accrual import accrued_interest_for_overlap_vectorized
 
 
 def compute_monthly_realized_nii(
@@ -19,43 +19,38 @@ def compute_monthly_realized_nii(
     start = pd.Timestamp(month_start)
     end_exclusive = pd.Timestamp(month_end) + pd.Timedelta(days=1)
 
-    total = 0.0
-    for row in deals_df.itertuples(index=False):
-        total += accrued_interest_for_overlap(
-            notional=row.notional,
-            annual_coupon=row.coupon,
-            deal_value_date=row.value_date,
-            deal_maturity_date=row.maturity_date,
-            window_start=start,
-            window_end=end_exclusive,
-        )
-    return float(total)
+    accrued = accrued_interest_for_overlap_vectorized(
+        notional=deals_df['notional'],
+        annual_coupon=deals_df['coupon'],
+        deal_value_date=deals_df['value_date'],
+        deal_maturity_date=deals_df['maturity_date'],
+        window_start=start,
+        window_end=end_exclusive,
+    )
+    return float(accrued.sum())
 
 
 def accrued_interest_to_date(deals_df: pd.DataFrame, as_of_date: pd.Timestamp) -> float:
     """Accrued interest for active deals from value date to as-of date."""
     as_of = pd.Timestamp(as_of_date)
-    active_mask = deals_df.apply(
-        lambda row: is_active(row['value_date'], row['maturity_date'], as_of), axis=1
+    active = active_deals_snapshot(deals_df, as_of)
+    if active.empty:
+        return 0.0
+    accrued = accrued_interest_for_overlap_vectorized(
+        notional=active['notional'],
+        annual_coupon=active['coupon'],
+        deal_value_date=active['value_date'],
+        deal_maturity_date=active['maturity_date'],
+        window_start=active['value_date'],
+        window_end=as_of,
     )
-    active = deals_df.loc[active_mask]
-    total = 0.0
-    for row in active.itertuples(index=False):
-        total += accrued_interest_for_overlap(
-            row.notional,
-            row.coupon,
-            row.value_date,
-            row.maturity_date,
-            row.value_date,
-            as_of,
-        )
-    return float(total)
+    return float(accrued.sum())
 
 
 def active_deals_snapshot(deals_df: pd.DataFrame, as_of_date: pd.Timestamp) -> pd.DataFrame:
     """Return active deals at a specific date."""
     as_of = pd.Timestamp(as_of_date)
-    mask = deals_df.apply(lambda r: is_active(r['value_date'], r['maturity_date'], as_of), axis=1)
+    mask = (deals_df['value_date'] <= as_of) & (as_of < deals_df['maturity_date'])
     return deals_df.loc[mask].copy()
 
 

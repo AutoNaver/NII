@@ -60,46 +60,22 @@ def _aligned_secondary_range(
     return (-a, k * a)
 
 
-def _render_selected_chart(
-    *,
-    fig_notional: go.Figure,
-    fig_cumulative: go.Figure,
-    fig_notional_coupon: go.Figure,
-    fig_effective_contribution: go.Figure,
-    fig_deal_count: go.Figure,
-    fig_refill_effective: go.Figure | None,
-    fig_refill_cumulative: go.Figure | None,
-    chart_view: str,
-    key_prefix: str,
-) -> str:
-    available_options = [
+def _available_runoff_chart_options(include_refill_views: bool) -> list[str]:
+    options = [
         'Notional Decomposition',
         'Effective Interest Decomposition',
         'Effective Interest Contribution',
         'Deal Count Decomposition',
         'Cumulative Notional',
     ]
-    if fig_refill_effective is not None:
-        available_options.append('Effective Interest Decomposition (Refill/Growth)')
-    if fig_refill_cumulative is not None:
-        available_options.append('Cumulative Notional (Refill/Growth)')
-
-    option = coerce_option(chart_view, available_options, available_options[0])
-    if option == 'Notional Decomposition':
-        st.plotly_chart(fig_notional, use_container_width=True, key=f'{key_prefix}_notional')
-    elif option == 'Effective Interest Decomposition':
-        st.plotly_chart(fig_notional_coupon, use_container_width=True, key=f'{key_prefix}_nc')
-    elif option == 'Effective Interest Contribution':
-        st.plotly_chart(fig_effective_contribution, use_container_width=True, key=f'{key_prefix}_effective_contribution')
-    elif option == 'Deal Count Decomposition':
-        st.plotly_chart(fig_deal_count, use_container_width=True, key=f'{key_prefix}_deals')
-    elif option == 'Effective Interest Decomposition (Refill/Growth)' and fig_refill_effective is not None:
-        st.plotly_chart(fig_refill_effective, use_container_width=True, key=f'{key_prefix}_refill_effective')
-    elif option == 'Cumulative Notional (Refill/Growth)' and fig_refill_cumulative is not None:
-        st.plotly_chart(fig_refill_cumulative, use_container_width=True, key=f'{key_prefix}_refill_cumulative')
-    else:
-        st.plotly_chart(fig_cumulative, use_container_width=True, key=f'{key_prefix}_cumulative')
-    return option
+    if include_refill_views:
+        options.extend(
+            [
+                'Effective Interest Decomposition (Refill/Growth)',
+                'Cumulative Notional (Refill/Growth)',
+            ]
+        )
+    return options
 
 
 def _component_chart(
@@ -752,106 +728,16 @@ def render_runoff_delta_charts(
         deals_matured = _col_or_zero('matured_deal_count')
         deals_total = active_df['deal_count_d2']
 
-    # Bucket notional decomposition (daily-interest style)
-    fig_buckets = _component_chart(
-        x=active_df['remaining_maturity_months'],
-        y_existing=notional_existing,
-        y_added=notional_added,
-        y_matured=notional_matured,
-        y_total=notional_total,
-        y_cumulative=notional_total.cumsum(),
-        title=f'Runoff Buckets: Notional Decomposition ({basis})',
-        x_label='Remaining Maturity (Months)',
-        y_label='Signed Notional',
-        cumulative_label='Cumulative Signed Notional (Running)',
-    )
-
     # Cumulative notional as runoff profile (decreasing over time as maturities roll off)
     cum_notional_existing = abs_notional_existing[::-1].cumsum()[::-1]
     cum_notional_added = abs_notional_added[::-1].cumsum()[::-1]
     cum_notional_matured = abs_notional_matured[::-1].cumsum()[::-1]
     cum_notional_total = abs_notional_total[::-1].cumsum()[::-1]
-    fig_totals = _component_chart(
-        x=active_df['remaining_maturity_months'],
-        y_existing=cum_notional_existing,
-        y_added=cum_notional_added,
-        y_matured=cum_notional_matured,
-        y_total=cum_notional_total,
-        y_cumulative=None,
-        title=f'Runoff Buckets: Cumulative Notional Decomposition ({basis})',
-        x_label='Remaining Maturity (Months)',
-        y_label='Cumulative Abs Notional',
-        cumulative_label='Cumulative Abs Notional',
-    )
-
-    # Notional*coupon decomposition
-    nc_cumulative = nc_total.cumsum()
-    fig_nc = _component_chart(
-        x=active_df['remaining_maturity_months'],
-        y_existing=nc_existing,
-        y_added=nc_added,
-        y_matured=nc_matured,
-        y_total=nc_total,
-        y_cumulative=nc_cumulative,
-        title=f'Runoff Buckets: Effective Interest Decomposition ({basis})',
-        x_label='Remaining Maturity (Months)',
-        y_label='Effective Interest',
-        cumulative_label='Cumulative Effective Interest',
-    )
-    fig_effective_contribution = _effective_contribution_chart(
-        x=active_df['remaining_maturity_months'],
-        y_existing=nc_existing,
-        y_added=nc_added,
-        y_matured=nc_matured,
-        y_total=nc_total,
-        y_cumulative=nc_total.cumsum(),
-        title=f'Runoff Buckets: Effective Interest Contribution ({basis})',
-        x_label='Remaining Maturity (Months)',
-        cumulative_label='Cumulative Effective Interest (Running)',
-    )
-    if deals_df is not None and basis_t1 is not None and basis_t2 is not None:
-        basis_date = pd.Timestamp(basis_t1) if basis == 'T1' else pd.Timestamp(basis_t2)
-        target_month_end = basis_date + pd.offsets.MonthEnd(1)
-        bdf = _bucketed_month_effective_contribution(
-            deals_df=deals_df,
-            basis_date=basis_date,
-            target_month_end=target_month_end,
-        )
-        fig_effective_contribution = _effective_contribution_chart(
-            x=bdf['remaining_maturity_months'],
-            y_existing=bdf['existing'],
-            y_added=bdf['added'],
-            y_matured=bdf['matured'],
-            y_total=bdf['total'],
-            y_cumulative=bdf['total'].cumsum(),
-            title=(
-                f'Effective Interest Contribution by Remaining Maturity Bucket '
-                f'for {pd.Timestamp(target_month_end).date().isoformat()} ({basis})'
-            ),
-            x_label='Remaining Maturity (Months)',
-            cumulative_label='Cumulative Effective Interest (Running)',
-        )
-
-    # Deal count decomposition
-    fig_deals = _component_chart(
-        x=active_df['remaining_maturity_months'],
-        y_existing=deals_existing,
-        y_added=deals_added,
-        y_matured=deals_matured,
-        y_total=deals_total,
-        y_cumulative=deals_total.cumsum(),
-        title=f'Runoff Buckets: Deal Count Decomposition ({basis})',
-        x_label='Remaining Maturity (Months)',
-        y_label='Deal Count',
-        cumulative_label='Cumulative Deal Count',
-    )
-
-    fig_refill_effective = None
-    fig_refill_cumulative = None
     refill_required = pd.Series(0.0, index=active_df.index, dtype=float)
     growth_required = pd.Series(0.0, index=active_df.index, dtype=float)
     refill_effective = pd.Series(0.0, index=active_df.index, dtype=float)
     growth_effective = pd.Series(0.0, index=active_df.index, dtype=float)
+    refill_title_suffix = 'Refill'
     refill_series = _build_refill_series(
         base_notional_total=abs_notional_total.astype(float),
         base_effective_total=nc_total.astype(float),
@@ -871,11 +757,96 @@ def render_runoff_delta_charts(
         refill_rate = refill_series['curve_rate'].astype(float)
         refill_effective = refill_required * refill_rate * (30.0 / 360.0)
         growth_effective = growth_required * refill_rate * (30.0 / 360.0)
-        refill_effective_total = nc_total + refill_effective + growth_effective
-        refill_title_suffix = 'Refill'
         if str(growth_mode).strip().lower() == 'user_defined' and float(monthly_growth_amount) > 0.0:
             refill_title_suffix = f'Refill + Growth ({monthly_growth_amount:,.2f}/month)'
-        fig_refill_effective = _component_chart(
+    include_refill_views = refill_series is not None
+    selected_view = coerce_option(
+        chart_view,
+        _available_runoff_chart_options(include_refill_views),
+        'Notional Decomposition',
+    )
+
+    if selected_view == 'Notional Decomposition':
+        fig = _component_chart(
+            x=active_df['remaining_maturity_months'],
+            y_existing=notional_existing,
+            y_added=notional_added,
+            y_matured=notional_matured,
+            y_total=notional_total,
+            y_cumulative=notional_total.cumsum(),
+            title=f'Runoff Buckets: Notional Decomposition ({basis})',
+            x_label='Remaining Maturity (Months)',
+            y_label='Signed Notional',
+            cumulative_label='Cumulative Signed Notional (Running)',
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_notional')
+    elif selected_view == 'Effective Interest Decomposition':
+        fig = _component_chart(
+            x=active_df['remaining_maturity_months'],
+            y_existing=nc_existing,
+            y_added=nc_added,
+            y_matured=nc_matured,
+            y_total=nc_total,
+            y_cumulative=nc_total.cumsum(),
+            title=f'Runoff Buckets: Effective Interest Decomposition ({basis})',
+            x_label='Remaining Maturity (Months)',
+            y_label='Effective Interest',
+            cumulative_label='Cumulative Effective Interest',
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_nc')
+    elif selected_view == 'Effective Interest Contribution':
+        if deals_df is not None and basis_t1 is not None and basis_t2 is not None:
+            basis_date = pd.Timestamp(basis_t1) if basis == 'T1' else pd.Timestamp(basis_t2)
+            target_month_end = basis_date + pd.offsets.MonthEnd(1)
+            bdf = _bucketed_month_effective_contribution(
+                deals_df=deals_df,
+                basis_date=basis_date,
+                target_month_end=target_month_end,
+            )
+            fig = _effective_contribution_chart(
+                x=bdf['remaining_maturity_months'],
+                y_existing=bdf['existing'],
+                y_added=bdf['added'],
+                y_matured=bdf['matured'],
+                y_total=bdf['total'],
+                y_cumulative=bdf['total'].cumsum(),
+                title=(
+                    f'Effective Interest Contribution by Remaining Maturity Bucket '
+                    f'for {pd.Timestamp(target_month_end).date().isoformat()} ({basis})'
+                ),
+                x_label='Remaining Maturity (Months)',
+                cumulative_label='Cumulative Effective Interest (Running)',
+            )
+        else:
+            fig = _effective_contribution_chart(
+                x=active_df['remaining_maturity_months'],
+                y_existing=nc_existing,
+                y_added=nc_added,
+                y_matured=nc_matured,
+                y_total=nc_total,
+                y_cumulative=nc_total.cumsum(),
+                title=f'Runoff Buckets: Effective Interest Contribution ({basis})',
+                x_label='Remaining Maturity (Months)',
+                cumulative_label='Cumulative Effective Interest (Running)',
+            )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_effective_contribution')
+    elif selected_view == 'Deal Count Decomposition':
+        fig = _component_chart(
+            x=active_df['remaining_maturity_months'],
+            y_existing=deals_existing,
+            y_added=deals_added,
+            y_matured=deals_matured,
+            y_total=deals_total,
+            y_cumulative=deals_total.cumsum(),
+            title=f'Runoff Buckets: Deal Count Decomposition ({basis})',
+            x_label='Remaining Maturity (Months)',
+            y_label='Deal Count',
+            cumulative_label='Cumulative Deal Count',
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_deals')
+    elif selected_view == 'Effective Interest Decomposition (Refill/Growth)' and include_refill_views:
+        refill_effective_total = nc_total + refill_effective + growth_effective
+        fig = _component_chart(
             x=active_df['remaining_maturity_months'],
             y_existing=nc_existing,
             y_added=nc_added,
@@ -889,9 +860,10 @@ def render_runoff_delta_charts(
             y_label='Effective Interest',
             cumulative_label='Cumulative Effective Interest',
         )
-
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_effective')
+    elif selected_view == 'Cumulative Notional (Refill/Growth)' and include_refill_views:
         refill_notional_total = cum_notional_total + refill_required + growth_required
-        fig_refill_cumulative = _component_chart(
+        fig = _component_chart(
             x=active_df['remaining_maturity_months'],
             y_existing=cum_notional_existing,
             y_added=cum_notional_added,
@@ -905,18 +877,21 @@ def render_runoff_delta_charts(
             y_label='Cumulative Abs Notional',
             cumulative_label='Cumulative Abs Notional',
         )
-
-    selected_view = _render_selected_chart(
-        fig_notional=fig_buckets,
-        fig_cumulative=fig_totals,
-        fig_notional_coupon=fig_nc,
-        fig_effective_contribution=fig_effective_contribution,
-        fig_deal_count=fig_deals,
-        fig_refill_effective=fig_refill_effective,
-        fig_refill_cumulative=fig_refill_cumulative,
-        chart_view=chart_view,
-        key_prefix=key_prefix,
-    )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_cumulative')
+    else:
+        fig = _component_chart(
+            x=active_df['remaining_maturity_months'],
+            y_existing=cum_notional_existing,
+            y_added=cum_notional_added,
+            y_matured=cum_notional_matured,
+            y_total=cum_notional_total,
+            y_cumulative=None,
+            title=f'Runoff Buckets: Cumulative Notional Decomposition ({basis})',
+            x_label='Remaining Maturity (Months)',
+            y_label='Cumulative Abs Notional',
+            cumulative_label='Cumulative Abs Notional',
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_cumulative')
 
     if basis == 'T1' and basis_t1 is not None:
         basis_date = pd.Timestamp(basis_t1)
@@ -1044,145 +1019,15 @@ def render_calendar_runoff_charts(
         deals_matured = _col_or_zero('matured_deal_count')
         deals_total = df['deal_count_t2']
 
-    fig_buckets = _component_chart(
-        x=x_vals,
-        y_existing=notional_existing,
-        y_added=notional_added,
-        y_matured=notional_matured,
-        y_total=notional_total,
-        y_cumulative=notional_total.cumsum(),
-        title=f'Runoff Buckets by Calendar Month: Notional Decomposition ({basis})',
-        x_label='Calendar Month End',
-        y_label='Signed Notional',
-        cumulative_label='Cumulative Signed Notional (Running)',
-    )
-
     cum_notional_existing = abs_notional_existing[::-1].cumsum()[::-1]
     cum_notional_added = abs_notional_added[::-1].cumsum()[::-1]
     cum_notional_matured = abs_notional_matured[::-1].cumsum()[::-1]
     cum_notional_total = abs_notional_total[::-1].cumsum()[::-1]
-    fig_totals = _component_chart(
-        x=x_vals,
-        y_existing=cum_notional_existing,
-        y_added=cum_notional_added,
-        y_matured=cum_notional_matured,
-        y_total=cum_notional_total,
-        y_cumulative=None,
-        title=f'Runoff Buckets by Calendar Month: Cumulative Notional Decomposition ({basis})',
-        x_label='Calendar Month End',
-        y_label='Cumulative Abs Notional',
-        cumulative_label='Cumulative Abs Notional',
-    )
-
-    fig_nc = _component_chart(
-        x=x_vals,
-        y_existing=nc_existing,
-        y_added=nc_added,
-        y_matured=nc_matured,
-        y_total=nc_total,
-        y_cumulative=nc_total.cumsum(),
-        title=f'Runoff Buckets by Calendar Month: Effective Interest Decomposition ({basis})',
-        x_label='Calendar Month End',
-        y_label='Effective Interest',
-        cumulative_label='Cumulative Effective Interest',
-    )
-    fig_effective_contribution = _effective_contribution_chart(
-        x=x_vals,
-        y_existing=nc_existing,
-        y_added=nc_added,
-        y_matured=nc_matured,
-        y_total=nc_total,
-        y_cumulative=nc_total.cumsum(),
-        title=f'Runoff Buckets by Calendar Month: Effective Interest Contribution ({basis})',
-        x_label='Calendar Month End',
-        cumulative_label='Cumulative Effective Interest (Running)',
-    )
-    # In calendar display mode, show bucketed contribution for the first
-    # calendar step (the selected basis month) to reconcile with daily totals.
-    if deals_df is not None and basis_t1 is not None and basis_t2 is not None:
-        basis_date = pd.Timestamp(basis_t1) if is_t1_basis else pd.Timestamp(basis_t2)
-        target_month_end = basis_date + pd.offsets.MonthEnd(0)
-        bdf = _bucketed_month_effective_contribution(
-            deals_df=deals_df,
-            basis_date=basis_date,
-            target_month_end=target_month_end,
-        )
-        fig_effective_contribution = _effective_contribution_chart(
-            x=bdf['remaining_maturity_months'],
-            y_existing=bdf['existing'],
-            y_added=bdf['added'],
-            y_matured=bdf['matured'],
-            y_total=bdf['total'],
-            y_cumulative=bdf['total'].cumsum(),
-            title=(
-                f'Effective Interest Contribution by Remaining Maturity Bucket '
-                f'for {pd.Timestamp(target_month_end).date().isoformat()} ({basis})'
-            ),
-            x_label='Remaining Maturity (Months)',
-            cumulative_label='Cumulative Effective Interest (Running)',
-        )
-    elif runoff_compare_df is not None and not runoff_compare_df.empty:
-        bdf = runoff_compare_df.copy()
-        bmask = (
-            (bdf[['abs_notional_d1', 'abs_notional_d2', 'cumulative_abs_notional_d1', 'cumulative_abs_notional_d2']].sum(axis=1) > 0)
-            | ((bdf['deal_count_d1'] + bdf['deal_count_d2']) > 0)
-        )
-        bdf = bdf.loc[bmask].copy()
-        if bdf.empty:
-            bdf = runoff_compare_df.head(24).copy()
-
-        def _bfirst_available(cols: list[str]) -> pd.Series:
-            for col in cols:
-                if col in bdf.columns:
-                    return bdf[col].astype(float)
-            return pd.Series(0.0, index=bdf.index, dtype=float)
-
-        if is_t1_basis:
-            bucket_nc_existing = _bfirst_available(['effective_interest_d1', 'notional_coupon_d1'])
-            bucket_nc_added = pd.Series(0.0, index=bdf.index, dtype=float)
-            bucket_nc_matured = pd.Series(0.0, index=bdf.index, dtype=float)
-            bucket_nc_total = _bfirst_available(['effective_interest_d1', 'notional_coupon_d1'])
-        else:
-            bucket_nc_existing = (
-                _bfirst_available(['effective_interest_d2', 'notional_coupon_d2'])
-                - _bfirst_available(['added_effective_interest', 'added_notional_coupon'])
-                + _bfirst_available(['matured_effective_interest', 'matured_notional_coupon'])
-            )
-            bucket_nc_added = _bfirst_available(['added_effective_interest', 'added_notional_coupon'])
-            bucket_nc_matured = _bfirst_available(['matured_effective_interest', 'matured_notional_coupon'])
-            bucket_nc_total = _bfirst_available(['effective_interest_d2', 'notional_coupon_d2'])
-
-        fig_effective_contribution = _effective_contribution_chart(
-            x=bdf['remaining_maturity_months'],
-            y_existing=bucket_nc_existing,
-            y_added=bucket_nc_added,
-            y_matured=bucket_nc_matured,
-            y_total=bucket_nc_total,
-            y_cumulative=bucket_nc_total.cumsum(),
-            title=f'Runoff Buckets: Effective Interest Contribution ({basis})',
-            x_label='Remaining Maturity (Months)',
-            cumulative_label='Cumulative Effective Interest (Running)',
-        )
-
-    fig_deals = _component_chart(
-        x=x_vals,
-        y_existing=deals_existing,
-        y_added=deals_added,
-        y_matured=deals_matured,
-        y_total=deals_total,
-        y_cumulative=deals_total.cumsum(),
-        title=f'Runoff Buckets by Calendar Month: Deal Count Decomposition ({basis})',
-        x_label='Calendar Month End',
-        y_label='Deal Count',
-        cumulative_label='Cumulative Deal Count',
-    )
-
-    fig_refill_effective = None
-    fig_refill_cumulative = None
     refill_required = pd.Series(0.0, index=df.index, dtype=float)
     growth_required = pd.Series(0.0, index=df.index, dtype=float)
     refill_effective = pd.Series(0.0, index=df.index, dtype=float)
     growth_effective = pd.Series(0.0, index=df.index, dtype=float)
+    refill_title_suffix = 'Refill'
     tenor_points = pd.Series(range(1, len(df) + 1), index=df.index, dtype=float)
     refill_series = _build_refill_series(
         base_notional_total=abs_notional_total.astype(float),
@@ -1203,11 +1048,140 @@ def render_calendar_runoff_charts(
         refill_rate = refill_series['curve_rate'].astype(float)
         refill_effective = refill_required * refill_rate * (30.0 / 360.0)
         growth_effective = growth_required * refill_rate * (30.0 / 360.0)
-        refill_effective_total = nc_total + refill_effective + growth_effective
-        refill_title_suffix = 'Refill'
         if str(growth_mode).strip().lower() == 'user_defined' and float(monthly_growth_amount) > 0.0:
             refill_title_suffix = f'Refill + Growth ({monthly_growth_amount:,.2f}/month)'
-        fig_refill_effective = _component_chart(
+    include_refill_views = refill_series is not None
+    selected_view = coerce_option(
+        chart_view,
+        _available_runoff_chart_options(include_refill_views),
+        'Notional Decomposition',
+    )
+
+    if selected_view == 'Notional Decomposition':
+        fig = _component_chart(
+            x=x_vals,
+            y_existing=notional_existing,
+            y_added=notional_added,
+            y_matured=notional_matured,
+            y_total=notional_total,
+            y_cumulative=notional_total.cumsum(),
+            title=f'Runoff Buckets by Calendar Month: Notional Decomposition ({basis})',
+            x_label='Calendar Month End',
+            y_label='Signed Notional',
+            cumulative_label='Cumulative Signed Notional (Running)',
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_notional')
+    elif selected_view == 'Effective Interest Decomposition':
+        fig = _component_chart(
+            x=x_vals,
+            y_existing=nc_existing,
+            y_added=nc_added,
+            y_matured=nc_matured,
+            y_total=nc_total,
+            y_cumulative=nc_total.cumsum(),
+            title=f'Runoff Buckets by Calendar Month: Effective Interest Decomposition ({basis})',
+            x_label='Calendar Month End',
+            y_label='Effective Interest',
+            cumulative_label='Cumulative Effective Interest',
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_nc')
+    elif selected_view == 'Effective Interest Contribution':
+        # In calendar display mode, show bucketed contribution for the first
+        # calendar step (the selected basis month) to reconcile with daily totals.
+        if deals_df is not None and basis_t1 is not None and basis_t2 is not None:
+            basis_date = pd.Timestamp(basis_t1) if is_t1_basis else pd.Timestamp(basis_t2)
+            target_month_end = basis_date + pd.offsets.MonthEnd(0)
+            bdf = _bucketed_month_effective_contribution(
+                deals_df=deals_df,
+                basis_date=basis_date,
+                target_month_end=target_month_end,
+            )
+            fig = _effective_contribution_chart(
+                x=bdf['remaining_maturity_months'],
+                y_existing=bdf['existing'],
+                y_added=bdf['added'],
+                y_matured=bdf['matured'],
+                y_total=bdf['total'],
+                y_cumulative=bdf['total'].cumsum(),
+                title=(
+                    f'Effective Interest Contribution by Remaining Maturity Bucket '
+                    f'for {pd.Timestamp(target_month_end).date().isoformat()} ({basis})'
+                ),
+                x_label='Remaining Maturity (Months)',
+                cumulative_label='Cumulative Effective Interest (Running)',
+            )
+        elif runoff_compare_df is not None and not runoff_compare_df.empty:
+            bdf = runoff_compare_df.copy()
+            bmask = (
+                (bdf[['abs_notional_d1', 'abs_notional_d2', 'cumulative_abs_notional_d1', 'cumulative_abs_notional_d2']].sum(axis=1) > 0)
+                | ((bdf['deal_count_d1'] + bdf['deal_count_d2']) > 0)
+            )
+            bdf = bdf.loc[bmask].copy()
+            if bdf.empty:
+                bdf = runoff_compare_df.head(24).copy()
+
+            def _bfirst_available(cols: list[str]) -> pd.Series:
+                for col in cols:
+                    if col in bdf.columns:
+                        return bdf[col].astype(float)
+                return pd.Series(0.0, index=bdf.index, dtype=float)
+
+            if is_t1_basis:
+                bucket_nc_existing = _bfirst_available(['effective_interest_d1', 'notional_coupon_d1'])
+                bucket_nc_added = pd.Series(0.0, index=bdf.index, dtype=float)
+                bucket_nc_matured = pd.Series(0.0, index=bdf.index, dtype=float)
+                bucket_nc_total = _bfirst_available(['effective_interest_d1', 'notional_coupon_d1'])
+            else:
+                bucket_nc_existing = (
+                    _bfirst_available(['effective_interest_d2', 'notional_coupon_d2'])
+                    - _bfirst_available(['added_effective_interest', 'added_notional_coupon'])
+                    + _bfirst_available(['matured_effective_interest', 'matured_notional_coupon'])
+                )
+                bucket_nc_added = _bfirst_available(['added_effective_interest', 'added_notional_coupon'])
+                bucket_nc_matured = _bfirst_available(['matured_effective_interest', 'matured_notional_coupon'])
+                bucket_nc_total = _bfirst_available(['effective_interest_d2', 'notional_coupon_d2'])
+
+            fig = _effective_contribution_chart(
+                x=bdf['remaining_maturity_months'],
+                y_existing=bucket_nc_existing,
+                y_added=bucket_nc_added,
+                y_matured=bucket_nc_matured,
+                y_total=bucket_nc_total,
+                y_cumulative=bucket_nc_total.cumsum(),
+                title=f'Runoff Buckets: Effective Interest Contribution ({basis})',
+                x_label='Remaining Maturity (Months)',
+                cumulative_label='Cumulative Effective Interest (Running)',
+            )
+        else:
+            fig = _effective_contribution_chart(
+                x=x_vals,
+                y_existing=nc_existing,
+                y_added=nc_added,
+                y_matured=nc_matured,
+                y_total=nc_total,
+                y_cumulative=nc_total.cumsum(),
+                title=f'Runoff Buckets by Calendar Month: Effective Interest Contribution ({basis})',
+                x_label='Calendar Month End',
+                cumulative_label='Cumulative Effective Interest (Running)',
+            )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_effective_contribution')
+    elif selected_view == 'Deal Count Decomposition':
+        fig = _component_chart(
+            x=x_vals,
+            y_existing=deals_existing,
+            y_added=deals_added,
+            y_matured=deals_matured,
+            y_total=deals_total,
+            y_cumulative=deals_total.cumsum(),
+            title=f'Runoff Buckets by Calendar Month: Deal Count Decomposition ({basis})',
+            x_label='Calendar Month End',
+            y_label='Deal Count',
+            cumulative_label='Cumulative Deal Count',
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_deals')
+    elif selected_view == 'Effective Interest Decomposition (Refill/Growth)' and include_refill_views:
+        refill_effective_total = nc_total + refill_effective + growth_effective
+        fig = _component_chart(
             x=x_vals,
             y_existing=nc_existing,
             y_added=nc_added,
@@ -1221,9 +1195,10 @@ def render_calendar_runoff_charts(
             y_label='Effective Interest',
             cumulative_label='Cumulative Effective Interest',
         )
-
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_effective')
+    elif selected_view == 'Cumulative Notional (Refill/Growth)' and include_refill_views:
         refill_notional_total = cum_notional_total + refill_required + growth_required
-        fig_refill_cumulative = _component_chart(
+        fig = _component_chart(
             x=x_vals,
             y_existing=cum_notional_existing,
             y_added=cum_notional_added,
@@ -1237,18 +1212,21 @@ def render_calendar_runoff_charts(
             y_label='Cumulative Abs Notional',
             cumulative_label='Cumulative Abs Notional',
         )
-
-    selected_view = _render_selected_chart(
-        fig_notional=fig_buckets,
-        fig_cumulative=fig_totals,
-        fig_notional_coupon=fig_nc,
-        fig_effective_contribution=fig_effective_contribution,
-        fig_deal_count=fig_deals,
-        fig_refill_effective=fig_refill_effective,
-        fig_refill_cumulative=fig_refill_cumulative,
-        chart_view=chart_view,
-        key_prefix=key_prefix,
-    )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_cumulative')
+    else:
+        fig = _component_chart(
+            x=x_vals,
+            y_existing=cum_notional_existing,
+            y_added=cum_notional_added,
+            y_matured=cum_notional_matured,
+            y_total=cum_notional_total,
+            y_cumulative=None,
+            title=f'Runoff Buckets by Calendar Month: Cumulative Notional Decomposition ({basis})',
+            x_label='Calendar Month End',
+            y_label='Cumulative Abs Notional',
+            cumulative_label='Cumulative Abs Notional',
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_cumulative')
 
     notional_total_for_table = cum_notional_total + refill_required + growth_required
     effective_total_for_table = nc_total + refill_effective + growth_effective

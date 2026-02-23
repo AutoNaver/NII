@@ -7,6 +7,7 @@ from datetime import date, datetime
 import pandas as pd
 
 from src.calculations.day_count import days_30_360
+from src.calculations.day_count import days_30_360_vectorized
 
 
 def _to_ts(value: pd.Timestamp | datetime | date | str) -> pd.Timestamp:
@@ -57,3 +58,33 @@ def accrued_interest_for_overlap(
     if end <= start:
         return 0.0
     return accrued_interest_eur(notional, annual_coupon, start, end)
+
+
+def accrued_interest_for_overlap_vectorized(
+    notional: pd.Series,
+    annual_coupon: pd.Series,
+    deal_value_date: pd.Series,
+    deal_maturity_date: pd.Series,
+    window_start: pd.Series | pd.Timestamp,
+    window_end: pd.Series | pd.Timestamp,
+) -> pd.Series:
+    """Vectorized overlap accrual for [window_start, window_end) under 30/360."""
+    index = deal_value_date.index
+    n = pd.Series(notional, index=index, dtype=float)
+    c = pd.Series(annual_coupon, index=index, dtype=float)
+    v = pd.to_datetime(pd.Series(deal_value_date, index=index))
+    m = pd.to_datetime(pd.Series(deal_maturity_date, index=index))
+    ws = pd.to_datetime(pd.Series(window_start, index=index))
+    we = pd.to_datetime(pd.Series(window_end, index=index))
+
+    start = pd.concat([v, ws], axis=1).max(axis=1)
+    end = pd.concat([m, we], axis=1).min(axis=1)
+
+    out = pd.Series(0.0, index=index, dtype=float)
+    active = end > start
+    if not bool(active.any()):
+        return out
+
+    days = days_30_360_vectorized(start.loc[active], end.loc[active]).astype(float)
+    out.loc[active] = n.loc[active] * c.loc[active] * days / 360.0
+    return out

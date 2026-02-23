@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.calculations.accrual import accrued_interest_for_overlap, is_active
+from src.calculations.accrual import accrued_interest_for_overlap
+from src.calculations.accrual import accrued_interest_for_overlap_vectorized
 from src.calculations.nii import active_deals_snapshot
 from src.calculations.nii import compute_monthly_realized_nii
 from src.utils.date_utils import month_end_sequence
@@ -35,9 +36,8 @@ def compute_monthly_buckets(deals_df: pd.DataFrame, month_end: pd.Timestamp) -> 
 
     rows: list[dict[str, float | pd.Timestamp]] = []
     for me in month_ends:
-        active = deals_df[
-            deals_df.apply(lambda r: is_active(r['value_date'], r['maturity_date'], me), axis=1)
-        ]
+        active_mask = (deals_df['value_date'] <= me) & (me < deals_df['maturity_date'])
+        active = deals_df.loc[active_mask]
         month_start = me.replace(day=1)
         interest_paid = compute_monthly_realized_nii(deals_df, month_start, me)
         rows.append(
@@ -194,9 +194,8 @@ def compute_monthly_activity_metrics(
         me = pd.Timestamp(me_raw) + pd.offsets.MonthEnd(0)
         ms = me.replace(day=1)
 
-        active = deals_df[
-            deals_df.apply(lambda r: is_active(r['value_date'], r['maturity_date'], me), axis=1)
-        ]
+        active_mask = (deals_df['value_date'] <= me) & (me < deals_df['maturity_date'])
+        active = deals_df.loc[active_mask]
         added = deals_df[(deals_df['value_date'] >= ms) & (deals_df['value_date'] <= me)]
 
         rows.append(
@@ -277,16 +276,15 @@ def compute_runoff_delta_attribution(
         work['_bucket_month_end'] = work['remaining_maturity_months'].apply(
             lambda k: pd.Timestamp(as_of) + pd.offsets.MonthEnd(int(k))
         )
-        work['_effective_interest'] = work.apply(
-            lambda r: accrued_interest_for_overlap(
-                notional=r['notional'],
-                annual_coupon=r['coupon'],
-                deal_value_date=r['value_date'],
-                deal_maturity_date=r['maturity_date'],
-                window_start=pd.Timestamp(r['_bucket_month_end']).replace(day=1),
-                window_end=pd.Timestamp(r['_bucket_month_end']) + pd.Timedelta(days=1),
-            ),
-            axis=1,
+        window_start = pd.to_datetime(work['_bucket_month_end']).dt.to_period('M').dt.to_timestamp()
+        window_end = pd.to_datetime(work['_bucket_month_end']) + pd.Timedelta(days=1)
+        work['_effective_interest'] = accrued_interest_for_overlap_vectorized(
+            notional=work['notional'],
+            annual_coupon=work['coupon'],
+            deal_value_date=work['value_date'],
+            deal_maturity_date=work['maturity_date'],
+            window_start=window_start,
+            window_end=window_end,
         )
 
         grouped = work.groupby('remaining_maturity_months').agg(
@@ -479,22 +477,23 @@ def compute_calendar_month_runoff_view(
     def _monthly_effective_interest(cohort: pd.DataFrame, month_ends: list[pd.Timestamp]) -> pd.Series:
         if cohort.empty:
             return pd.Series(0.0, index=month_ends, dtype=float)
+        cohort = cohort.copy()
+        cohort['value_date'] = pd.to_datetime(cohort['value_date'])
+        cohort['maturity_date'] = pd.to_datetime(cohort['maturity_date'])
         values: dict[pd.Timestamp, float] = {}
         for me_raw in month_ends:
             me = pd.Timestamp(me_raw) + pd.offsets.MonthEnd(0)
             ms = me.replace(day=1)
             end_exclusive = me + pd.Timedelta(days=1)
-            total = 0.0
-            for row in cohort.itertuples(index=False):
-                total += accrued_interest_for_overlap(
-                    notional=row.notional,
-                    annual_coupon=row.coupon,
-                    deal_value_date=row.value_date,
-                    deal_maturity_date=row.maturity_date,
-                    window_start=ms,
-                    window_end=end_exclusive,
-                )
-            values[me] = float(total)
+            accrued = accrued_interest_for_overlap_vectorized(
+                notional=cohort['notional'],
+                annual_coupon=cohort['coupon'],
+                deal_value_date=cohort['value_date'],
+                deal_maturity_date=cohort['maturity_date'],
+                window_start=ms,
+                window_end=end_exclusive,
+            )
+            values[me] = float(accrued.sum())
         return pd.Series(values, dtype=float)
 
     def _daily_style_matured_sum(month_end: pd.Timestamp) -> float:

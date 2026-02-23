@@ -1,4 +1,4 @@
-"""Daily interest time series chart with T1/T2 toggle."""
+"""Daily decomposition charts for interest and notional with T1/T2 toggle."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from src.dashboard.components.controls import coerce_option
-from src.dashboard.components.formatting import plot_axis_number_format
+from src.dashboard.components.formatting import plot_axis_number_format, style_numeric_table
 
 
 def _series_range(series_list: list[pd.Series]) -> tuple[float, float]:
@@ -57,38 +57,140 @@ def _aligned_secondary_range(
     return (-a, k * a)
 
 
+def _padded_range(
+    series_list: list[pd.Series],
+    *,
+    include_zero: bool,
+    pad_ratio: float = 0.08,
+    min_span_ratio: float = 0.01,
+) -> tuple[float, float]:
+    lo, hi = _series_range(series_list)
+    if include_zero:
+        lo = min(lo, 0.0)
+        hi = max(hi, 0.0)
+
+    span = hi - lo
+    if span <= 0.0:
+        base = max(abs(lo), abs(hi), 1.0)
+        pad = base * max(pad_ratio, 0.1)
+        return (lo - pad, hi + pad)
+
+    mid = (hi + lo) / 2.0
+    min_span = max(abs(mid) * min_span_ratio, 1e-9)
+    if span < min_span:
+        widen = (min_span - span) / 2.0
+        lo -= widen
+        hi += widen
+        span = hi - lo
+
+    pad = span * pad_ratio
+    return (lo - pad, hi + pad)
+
+
+def _delta_colors(values: pd.Series) -> list[str]:
+    colors: list[str] = []
+    for value in values.astype(float):
+        if value > 0.0:
+            colors.append('rgba(34, 197, 94, 0.72)')
+        elif value < 0.0:
+            colors.append('rgba(239, 68, 68, 0.72)')
+        else:
+            colors.append('rgba(148, 163, 184, 0.62)')
+    return colors
+
+
+def _delta_line_colors(values: pd.Series) -> list[str]:
+    colors: list[str] = []
+    for value in values.astype(float):
+        if value > 0.0:
+            colors.append('rgba(34, 197, 94, 1.0)')
+        elif value < 0.0:
+            colors.append('rgba(239, 68, 68, 1.0)')
+        else:
+            colors.append('rgba(148, 163, 184, 0.95)')
+    return colors
+
+
+def _build_interest_cumulative_table(df: pd.DataFrame) -> pd.DataFrame:
+    table = df.sort_values('date').copy()
+    if table.empty:
+        return pd.DataFrame(
+            columns=[
+                'Month End',
+                'Cumulative Existing Interest (EUR)',
+                'Cumulative Added Interest (EUR)',
+                'Cumulative Matured Interest (EUR)',
+                'Cumulative Total Interest (EUR)',
+            ]
+        )
+    last_date = pd.to_datetime(table['date'].iloc[-1]).date()
+    return pd.DataFrame(
+        [
+            {
+                'Month End': last_date,
+                'Cumulative Existing Interest (EUR)': float(table['interest_existing'].astype(float).sum()),
+                'Cumulative Added Interest (EUR)': float(table['interest_added'].astype(float).sum()),
+                'Cumulative Matured Interest (EUR)': float(table['interest_matured'].astype(float).sum()),
+                'Cumulative Total Interest (EUR)': float(table['interest_total'].astype(float).sum()),
+            }
+        ]
+    )
+
+
 def _plot_daily_metric(
     df: pd.DataFrame,
     title: str,
     metric_prefix: str,
     y_label: str,
     cumulative_label: str,
-    include_cumulative: bool = True,
+    include_bottom_cumulative: bool = False,
+    include_top_cumulative_total: bool = False,
 ) -> None:
     df = df.sort_values('date').copy()
     total_col = f'{metric_prefix}_total'
-    existing_col = f'{metric_prefix}_existing'
     added_col = f'{metric_prefix}_added'
     matured_col = f'{metric_prefix}_matured'
+    month_start_total = float(df[total_col].iloc[0]) if not df.empty else 0.0
+    baseline_series = pd.Series(month_start_total, index=df.index, dtype=float)
+    df['total_delta_from_start'] = df[total_col] - month_start_total
+    delta_colors = _delta_colors(df['total_delta_from_start'])
+    delta_line_colors = _delta_line_colors(df['total_delta_from_start'])
     df['cumulative_total'] = df[total_col].cumsum()
+    df['cumulative_added'] = df[added_col].cumsum()
     df['cumulative_matured'] = df[matured_col].cumsum()
+    df['cumulative_added_matured_aggregate'] = (df[added_col] + df[matured_col]).cumsum()
 
-    primary_top_min, primary_top_max = _series_range([df[existing_col], df[added_col], df[total_col]])
-    primary_top_min = min(primary_top_min, 0.0)
-    primary_top_max = max(primary_top_max, 0.0)
-
-    primary_bottom_min, primary_bottom_max = _series_range([df[matured_col]])
-    primary_bottom_min = min(primary_bottom_min, 0.0)
-    primary_bottom_max = max(primary_bottom_max, 0.0)
+    _, primary_top_max = _padded_range(
+        [df[total_col], baseline_series],
+        include_zero=True,
+        pad_ratio=0.12,
+    )
+    primary_top_min = 0.0
+    primary_top_max = max(primary_top_max, 1.0)
+    primary_bottom_min, primary_bottom_max = _padded_range(
+        [df[added_col], df[matured_col]],
+        include_zero=True,
+        pad_ratio=0.1,
+    )
 
     sec_top_lo = sec_top_hi = None
-    sec_bottom_lo = sec_bottom_hi = None
-    if include_cumulative:
-        sec_top_min, sec_top_max = _series_range([df['cumulative_total']])
+    if include_top_cumulative_total:
+        sec_top_min, sec_top_max = _padded_range(
+            [df['cumulative_total']],
+            include_zero=True,
+            pad_ratio=0.08,
+        )
         sec_top_lo, sec_top_hi = _aligned_secondary_range(
             primary_top_min, primary_top_max, sec_top_min, sec_top_max
         )
-        sec_bottom_min, sec_bottom_max = _series_range([df['cumulative_matured']])
+
+    sec_bottom_lo = sec_bottom_hi = None
+    if include_bottom_cumulative:
+        sec_bottom_min, sec_bottom_max = _padded_range(
+            [df['cumulative_added'], df['cumulative_matured'], df['cumulative_added_matured_aggregate']],
+            include_zero=True,
+            pad_ratio=0.08,
+        )
         sec_bottom_lo, sec_bottom_hi = _aligned_secondary_range(
             primary_bottom_min, primary_bottom_max, sec_bottom_min, sec_bottom_max
         )
@@ -97,25 +199,65 @@ def _plot_daily_metric(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        row_heights=[0.75, 0.25],
-        vertical_spacing=0.08,
-        specs=[[{"secondary_y": include_cumulative}], [{"secondary_y": include_cumulative}]],
+        row_heights=[0.58, 0.42],
+        vertical_spacing=0.26,
+        specs=[[{"secondary_y": include_top_cumulative_total}], [{"secondary_y": include_bottom_cumulative}]],
     )
     fig.add_bar(
         x=df['date'],
-        y=df[existing_col],
-        name='Existing',
+        y=baseline_series,
+        name='Month Start Base',
         marker=dict(color='#1f77b4'),
+        hovertemplate='Date: %{x|%Y-%m-%d}<br>Month-start baseline: %{y:,.2f}<extra></extra>',
         row=1,
         col=1,
     )
+    fig.add_bar(
+        x=df['date'],
+        y=df['total_delta_from_start'],
+        base=baseline_series,
+        name='Delta vs Month Start (Shaded)',
+        marker=dict(
+            color=delta_colors,
+            line=dict(color=delta_line_colors, width=1.2),
+            pattern=dict(shape='x', solidity=0.5, fgcolor='rgba(255, 255, 255, 0.78)'),
+        ),
+        customdata=df[total_col],
+        hovertemplate='Date: %{x|%Y-%m-%d}<br>Delta vs month start: %{y:,.2f}<br>Total: %{customdata:,.2f}<extra></extra>',
+        row=1,
+        col=1,
+    )
+    fig.add_scatter(
+        x=df['date'],
+        y=df[total_col],
+        mode='lines+markers',
+        name='Total',
+        line=dict(color='#0f172a', width=2),
+        marker=dict(size=5, color='#0f172a'),
+        hovertemplate='Date: %{x|%Y-%m-%d}<br>Total: %{y:,.2f}<extra></extra>',
+        row=1,
+        col=1,
+        secondary_y=False,
+    )
+    if include_top_cumulative_total:
+        fig.add_scatter(
+            x=df['date'],
+            y=df['cumulative_total'],
+            mode='lines+markers',
+            name='Cumulative Total',
+            line=dict(color='#334155', width=2, dash='dot'),
+            row=1,
+            col=1,
+            secondary_y=True,
+        )
     fig.add_bar(
         x=df['date'],
         y=df[added_col],
-        name='Added (from deals starting this month)',
+        name='Added',
         marker=dict(color='#2ca02c'),
-        row=1,
+        row=2,
         col=1,
+        secondary_y=False,
     )
     fig.add_bar(
         x=df['date'],
@@ -126,7 +268,28 @@ def _plot_daily_metric(
         col=1,
         secondary_y=False,
     )
-    if include_cumulative:
+    if include_bottom_cumulative:
+        fig.add_scatter(
+            x=df['date'],
+            y=df['cumulative_added_matured_aggregate'],
+            mode='lines+markers',
+            name='Cumulative Added + Matured',
+            line=dict(color='#2563eb', width=2, dash='dot'),
+            marker=dict(size=5, color='#2563eb'),
+            row=2,
+            col=1,
+            secondary_y=True,
+        )
+        fig.add_scatter(
+            x=df['date'],
+            y=df['cumulative_added'],
+            mode='lines+markers',
+            name='Cumulative Added',
+            line=dict(color='#16a34a', width=2, dash='dot'),
+            row=2,
+            col=1,
+            secondary_y=True,
+        )
         fig.add_scatter(
             x=df['date'],
             y=df['cumulative_matured'],
@@ -137,45 +300,26 @@ def _plot_daily_metric(
             col=1,
             secondary_y=True,
         )
-    fig.add_scatter(
-        x=df['date'],
-        y=df[total_col],
-        mode='lines+markers',
-        name='Total',
-        line=dict(color='#00e5ff', width=3),
-        row=1,
-        col=1,
-        secondary_y=False,
-    )
-    if include_cumulative:
-        fig.add_scatter(
-            x=df['date'],
-            y=df['cumulative_total'],
-            mode='lines+markers',
-            name='Cumulative Total',
-            line=dict(color='#ffd166', width=2, dash='dot'),
-            row=1,
-            col=1,
-            secondary_y=True,
-        )
     fig.update_layout(
         title=title,
         barmode='relative',
         legend=dict(orientation='h'),
+        bargap=0.18,
     )
     fig.update_yaxes(
-        title_text=y_label,
+        title_text='Total (EUR)',
         row=1,
         col=1,
         secondary_y=False,
         range=[primary_top_min, primary_top_max],
-        zeroline=True,
-        zerolinewidth=1,
         separatethousands=True,
+        title_standoff=24,
+        title_font=dict(size=12),
+        automargin=True,
     )
-    if include_cumulative:
+    if include_top_cumulative_total:
         fig.update_yaxes(
-            title_text=cumulative_label,
+            title_text='Cum Total (EUR)',
             row=1,
             col=1,
             secondary_y=True,
@@ -184,9 +328,12 @@ def _plot_daily_metric(
             zeroline=True,
             zerolinewidth=1,
             separatethousands=True,
+            title_standoff=24,
+            title_font=dict(size=12),
+            automargin=True,
         )
     fig.update_yaxes(
-        title_text=f'Matured {y_label}',
+        title_text='Added/Matured (EUR)',
         row=2,
         col=1,
         secondary_y=False,
@@ -194,10 +341,13 @@ def _plot_daily_metric(
         zeroline=True,
         zerolinewidth=1,
         separatethousands=True,
+        title_standoff=24,
+        title_font=dict(size=12),
+        automargin=True,
     )
-    if include_cumulative:
+    if include_bottom_cumulative:
         fig.update_yaxes(
-            title_text=f'Cumulative Matured {y_label}',
+            title_text='Cum A+M (EUR)',
             row=2,
             col=1,
             secondary_y=True,
@@ -206,6 +356,9 @@ def _plot_daily_metric(
             zeroline=True,
             zerolinewidth=1,
             separatethousands=True,
+            title_standoff=24,
+            title_font=dict(size=12),
+            automargin=True,
         )
     fig.update_xaxes(
         title='Date',
@@ -213,9 +366,7 @@ def _plot_daily_metric(
         row=2,
         col=1,
     )
-    y_axes = ['yaxis', 'yaxis3']
-    if include_cumulative:
-        y_axes.extend(['yaxis2', 'yaxis4'])
+    y_axes = ['yaxis', 'yaxis2', 'yaxis3', 'yaxis4']
     fig = plot_axis_number_format(fig, y_axes=y_axes)
     st.plotly_chart(fig, use_container_width=True)
 
@@ -260,7 +411,8 @@ def render_daily_interest_chart(daily_t1: pd.DataFrame, daily_t2: pd.DataFrame, 
             metric_prefix='notional',
             y_label='Daily Notional (EUR)',
             cumulative_label='Cumulative Notional (EUR)',
-            include_cumulative=False,
+            include_bottom_cumulative=False,
+            include_top_cumulative_total=False,
         )
         return
 
@@ -271,8 +423,11 @@ def render_daily_interest_chart(daily_t1: pd.DataFrame, daily_t2: pd.DataFrame, 
             metric_prefix='interest',
             y_label='Daily Interest (EUR)',
             cumulative_label='Cumulative Interest (EUR)',
-            include_cumulative=True,
+            include_bottom_cumulative=True,
+            include_top_cumulative_total=True,
         )
+        st.caption(f'Month-End Cumulative Daily Interest Decomposition ({label_t1})')
+        st.dataframe(style_numeric_table(_build_interest_cumulative_table(daily_t1)), use_container_width=True)
     else:
         _plot_daily_metric(
             daily_t2,
@@ -280,5 +435,8 @@ def render_daily_interest_chart(daily_t1: pd.DataFrame, daily_t2: pd.DataFrame, 
             metric_prefix='interest',
             y_label='Daily Interest (EUR)',
             cumulative_label='Cumulative Interest (EUR)',
-            include_cumulative=True,
+            include_bottom_cumulative=True,
+            include_top_cumulative_total=True,
         )
+        st.caption(f'Month-End Cumulative Daily Interest Decomposition ({label_t2})')
+        st.dataframe(style_numeric_table(_build_interest_cumulative_table(daily_t2)), use_container_width=True)
