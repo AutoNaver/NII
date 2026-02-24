@@ -159,6 +159,7 @@ def render_runoff_controls(default_basis: str = 'T2') -> dict[str, Any]:
             [
                 'Effective Interest Decomposition (Refill/Growth)',
                 'Cumulative Notional (Refill/Growth)',
+                'Refill Allocation Heatmap',
             ]
         )
 

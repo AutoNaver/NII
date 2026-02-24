@@ -41,21 +41,6 @@ def _load(path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 @st.cache_data
-def _load_refill_logic(path: str) -> pd.DataFrame | None:
-    try:
-        xl = pd.ExcelFile(path)
-    except Exception:
-        return None
-    sheet_name = next((s for s in xl.sheet_names if str(s).strip().lower() == 'refill_logic'), None)
-    if sheet_name is None:
-        return None
-    try:
-        return xl.parse(sheet_name)
-    except Exception:
-        return None
-
-
-@st.cache_data
 def _cached_monthly_buckets(path: str, month_end: pd.Timestamp) -> pd.DataFrame:
     deals_df, _ = _load(path)
     return compute_monthly_buckets(deals_df, pd.Timestamp(month_end))
@@ -324,7 +309,7 @@ def _filter_runoff_calendar_table_by_view(table: pd.DataFrame, chart_view: str) 
 
     if chart_view == 'Deal Count Decomposition':
         cols.extend(_matches('deal count'))
-    elif chart_view in {'Cumulative Notional', 'Cumulative Notional (Refill/Growth)'}:
+    elif chart_view in {'Cumulative Notional', 'Cumulative Notional (Refill/Growth)', 'Refill Allocation Heatmap'}:
         cols.extend(_matches('cumulative notional'))
     elif chart_view in {'Effective Interest Contribution'}:
         cols.extend([c for c in _matches('effective interest') if 'cumulative' not in lower_cols[c]])
@@ -349,7 +334,7 @@ def main() -> None:
     st.set_page_config(page_title='NII Dashboard', layout='wide')
     st.title('Net Interest Income Dashboard')
 
-    current_path = st.session_state.get('global_input_path', str(DEFAULT_INPUT_PATH))
+    current_path = st.session_state.get('global_input_path', 'Input.xlsx')
     try:
         deals_probe, _ = _load(current_path)
         month_ends = _available_month_ends(deals_probe)
@@ -367,8 +352,7 @@ def main() -> None:
         st.error(f'Failed to load workbook at `{input_path}`: {exc}')
         st.stop()
 
-    refill_logic_df = _load_refill_logic(input_path)
-    st.session_state['runoff_has_refill_views'] = refill_logic_df is not None and not refill_logic_df.empty
+    st.session_state['runoff_has_refill_views'] = True
 
     month_ends = _available_month_ends(deals_df)
     if not month_ends:
@@ -378,7 +362,17 @@ def main() -> None:
     t1 = ui['t1'] if ui['t1'] is not None else month_ends[0]
     t2 = ui['t2'] if ui['t2_enabled'] else None
 
-    overview_tab, daily_tab, runoff_tab, diff_tab = st.tabs(['Overview', 'Daily', 'Runoff', 'Deal Differences'])
+    section_options = ['Overview', 'Daily', 'Runoff', 'Deal Differences']
+    section_current = st.session_state.get('main_section', 'Overview')
+    if section_current not in section_options:
+        section_current = 'Overview'
+    selected_section = st.radio(
+        label='Section',
+        options=section_options,
+        index=section_options.index(section_current),
+        horizontal=True,
+        key='main_section',
+    )
 
     prev_start, prev_end = previous_calendar_month_window(t1)
     realized_nii_t1 = compute_monthly_realized_nii(deals_df, prev_start, prev_end)
@@ -389,14 +383,14 @@ def main() -> None:
     row_t1 = monthly_t1[monthly_t1['month_end'] == t1].iloc[0]
 
     if t2 is None:
-        with overview_tab:
+        if selected_section == 'Overview':
             render_summary_cards(realized_nii_t1, active_count_t1, accrued_t1, title=f'Metrics at {t1.date()}')
             st.info('Enable `Monthly View 2 (T2)` in the sidebar to unlock comparison tabs.')
-        with daily_tab:
+        elif selected_section == 'Daily':
             st.info('Comparison mode required. Enable `T2` in the sidebar.')
-        with runoff_tab:
+        elif selected_section == 'Runoff':
             st.info('Comparison mode required. Enable `T2` in the sidebar.')
-        with diff_tab:
+        else:
             st.info('Comparison mode required. Enable `T2` in the sidebar.')
         return
 
@@ -408,7 +402,7 @@ def main() -> None:
     monthly_t2 = _cached_monthly_buckets(input_path, t2)
     row_t2 = monthly_t2[monthly_t2['month_end'] == t2].iloc[0]
 
-    with overview_tab:
+    if selected_section == 'Overview':
         st.subheader('Monthly View Delta Summary (T2 - T1)')
         d1, d2, d3, d4, d5 = st.columns(5)
         d1.metric('Realized NII Delta (EUR)', f'{(realized_nii_t2 - realized_nii_t1):,.2f}')
@@ -427,7 +421,7 @@ def main() -> None:
         metrics_table = _dual_view_metric_table(row_t1, row_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}')
         st.dataframe(style_numeric_table(metrics_table), use_container_width=True)
 
-    with daily_tab:
+    elif selected_section == 'Daily':
         st.caption(
             'Top chart uses a stacked-style total bar: month-start base plus shaded delta versus first day (green up, red down). '
             'Interest view also overlays cumulative Total in the top chart. '
@@ -438,7 +432,7 @@ def main() -> None:
         daily_t2 = _cached_daily_interest(input_path, t2)
         render_daily_interest_chart(daily_t1, daily_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}')
 
-    with runoff_tab:
+    elif selected_section == 'Runoff':
         runoff_ui = render_runoff_controls(default_basis=ui['runoff_decomposition_basis'])
         full_ui = {**ui, **runoff_ui}
 
@@ -450,7 +444,7 @@ def main() -> None:
                 deals_df=deals_df,
                 basis_t1=t1,
                 basis_t2=t2,
-                refill_logic_df=refill_logic_df,
+                refill_logic_df=None,
                 curve_df=curve_df,
                 ui_state=full_ui,
             )
@@ -462,7 +456,9 @@ def main() -> None:
             anchor = pd.Timestamp(t1 if basis == 'T1' else t2) + pd.offsets.MonthEnd(0)
             timeframe_end = anchor + pd.offsets.MonthEnd(240)
             needs_effective = 'Effective Interest' in str(full_ui.get('runoff_chart_view', ''))
+            needs_shifted_refill = 'Refill' in str(full_ui.get('runoff_chart_view', ''))
             calendar_runoff = _cached_calendar_runoff(input_path, t1, t2, needs_effective)
+            runoff_delta_for_refill = _cached_runoff_delta(input_path, t1, t2) if needs_shifted_refill else None
             filtered = calendar_runoff[
                 (calendar_runoff['calendar_month_end'] >= anchor)
                 & (calendar_runoff['calendar_month_end'] <= timeframe_end)
@@ -473,11 +469,11 @@ def main() -> None:
                 label_t1=f'T1 {t1.date()}',
                 label_t2=f'T2 {t2.date()}',
                 key_prefix='runoff_calendar',
-                runoff_compare_df=None,
+                runoff_compare_df=runoff_delta_for_refill,
                 deals_df=deals_df,
                 basis_t1=t1,
                 basis_t2=t2,
-                refill_logic_df=refill_logic_df,
+                refill_logic_df=None,
                 curve_df=curve_df,
                 ui_state=full_ui,
             )
@@ -485,7 +481,7 @@ def main() -> None:
             calendar_table = _filter_runoff_calendar_table_by_view(calendar_table, selected_view)
             st.dataframe(style_numeric_table(calendar_table), use_container_width=True)
 
-    with diff_tab:
+    else:
         diff = _cached_compare_month_ends(input_path, t1, t2)
         render_deal_diff_tables(diff, compact_mode=True)
 

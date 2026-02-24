@@ -73,9 +73,184 @@ def _available_runoff_chart_options(include_refill_views: bool) -> list[str]:
             [
                 'Effective Interest Decomposition (Refill/Growth)',
                 'Cumulative Notional (Refill/Growth)',
+                'Refill Allocation Heatmap',
             ]
         )
     return options
+
+
+def _refill_allocation_heatmap(
+    *,
+    month_ends: pd.Series,
+    refill_required: pd.Series,
+    growth_required: pd.Series,
+    growth_mode: str,
+    basis: str,
+    runoff_compare_df: pd.DataFrame | None,
+    title: str,
+    x_label: str,
+) -> go.Figure | None:
+    month_idx = pd.Series(month_ends, dtype='datetime64[ns]')
+    shifted = _shifted_portfolio_refill_weights(runoff_compare_df)
+    t0 = _t0_portfolio_weights(runoff_compare_df, basis=basis)
+    if shifted is None and t0 is None:
+        return None
+
+    months = pd.to_datetime(month_idx, errors='coerce').dt.strftime('%Y-%m').fillna('n/a')
+    refill_total = pd.Series(refill_required, index=month_idx.index, dtype=float).clip(lower=0.0)
+    growth_total = pd.Series(growth_required, index=month_idx.index, dtype=float).clip(lower=0.0)
+    include_growth = str(growth_mode).strip().lower() == 'user_defined' and float(growth_total.sum()) > 1e-12
+
+    refill_w = None
+    if shifted is not None:
+        refill_w = shifted.set_index('tenor')['weight'].astype(float)
+    elif t0 is not None:
+        refill_w = t0.astype(float)
+    if refill_w is None:
+        return None
+    refill_w = refill_w.clip(lower=0.0)
+    if float(refill_w.sum()) <= 1e-12:
+        return None
+    refill_w = refill_w / float(refill_w.sum())
+
+    growth_w = pd.Series(dtype=float)
+    if include_growth:
+        if t0 is not None and float(t0.sum()) > 1e-12:
+            growth_w = t0.astype(float).clip(lower=0.0)
+        else:
+            growth_w = refill_w.copy()
+        if float(growth_w.sum()) > 1e-12:
+            growth_w = growth_w / float(growth_w.sum())
+        else:
+            growth_w = pd.Series(dtype=float)
+
+    tenor_index = pd.Index(sorted(set(refill_w.index.astype(int)).union(set(growth_w.index.astype(int)))), dtype=int)
+    refill_vec = refill_w.reindex(tenor_index, fill_value=0.0).to_numpy(dtype=float)
+    growth_vec = growth_w.reindex(tenor_index, fill_value=0.0).to_numpy(dtype=float)
+    z = np.outer(refill_vec, refill_total.to_numpy(dtype=float))
+    if include_growth and growth_vec.size:
+        z = z + np.outer(growth_vec, growth_total.to_numpy(dtype=float))
+
+    row_mask = np.nansum(z, axis=1) > 1e-12
+    if bool(row_mask.any()):
+        z = z[row_mask, :]
+        tenor_index = tenor_index[row_mask]
+
+    z_plot = np.where(z > 0.0, z, np.nan)
+    if np.isnan(z_plot).all():
+        z_plot = z
+
+    fig = go.Figure(
+        data=[
+            go.Heatmap(
+                x=months,
+                y=tenor_index.to_numpy(),
+                z=z_plot,
+                colorscale='YlGnBu',
+                colorbar=dict(title='Refill + Growth (EUR)' if include_growth else 'Refill (EUR)'),
+                hovertemplate='Month: %{x}<br>Tenor: %{y}M<br>Allocation: %{z:,.2f}<extra></extra>',
+            )
+        ]
+    )
+    fig.update_layout(
+        title=title,
+        hovermode='closest',
+        plot_bgcolor='rgba(0,0,0,0)',
+    )
+    fig.update_xaxes(title=x_label, type='category')
+    fig.update_yaxes(title='Refill Tenor Bucket (Months)')
+    return fig
+
+
+def _refill_volume_interest_chart(
+    *,
+    month_ends: pd.Series,
+    refill_required: pd.Series,
+    growth_volume: pd.Series,
+    refill_rate: pd.Series,
+    title: str,
+    x_label: str,
+) -> go.Figure:
+    month_idx = pd.Series(month_ends, dtype='datetime64[ns]')
+    months = pd.to_datetime(month_idx, errors='coerce').dt.strftime('%Y-%m').fillna('n/a')
+    refill_volume = pd.Series(refill_required, index=month_idx.index, dtype=float).clip(lower=0.0)
+    growth_volume = pd.Series(growth_volume, index=month_idx.index, dtype=float).clip(lower=0.0)
+    total_volume = refill_volume + growth_volume
+    annual_refill_interest = refill_volume * pd.Series(refill_rate, index=month_idx.index, dtype=float)
+    annual_growth_interest = growth_volume * pd.Series(refill_rate, index=month_idx.index, dtype=float)
+    annual_total_interest = annual_refill_interest + annual_growth_interest
+
+    fig = go.Figure()
+    fig.add_scatter(
+        x=months,
+        y=refill_volume,
+        mode='lines+markers',
+        name='Refill Volume',
+        line=dict(color='#22c55e', width=2),
+    )
+    fig.add_scatter(
+        x=months,
+        y=growth_volume,
+        mode='lines+markers',
+        name='Growth Volume',
+        line=dict(color='#f59e0b', width=2),
+    )
+    fig.add_scatter(
+        x=months,
+        y=total_volume,
+        mode='lines+markers',
+        name='Total Volume',
+        line=dict(color='#e2e8f0', width=2, dash='dash'),
+    )
+    fig.add_scatter(
+        x=months,
+        y=annual_refill_interest,
+        mode='lines+markers',
+        name='Refill Interest (Annualized)',
+        line=dict(color='#60a5fa', width=2, dash='dot'),
+        yaxis='y2',
+    )
+    fig.add_scatter(
+        x=months,
+        y=annual_growth_interest,
+        mode='lines+markers',
+        name='Growth Interest (Annualized)',
+        line=dict(color='#c084fc', width=2, dash='dot'),
+        yaxis='y2',
+    )
+    fig.add_scatter(
+        x=months,
+        y=annual_total_interest,
+        mode='lines+markers',
+        name='Total Interest (Annualized)',
+        line=dict(color='#22d3ee', width=2, dash='dash'),
+        yaxis='y2',
+    )
+    fig.update_layout(
+        title=title,
+        hovermode='x unified',
+        legend=dict(orientation='h'),
+        plot_bgcolor='rgba(0,0,0,0)',
+        yaxis=dict(
+            title='Refill Volume (EUR)',
+            zeroline=True,
+            zerolinewidth=1,
+            separatethousands=True,
+            automargin=True,
+        ),
+        yaxis2=dict(
+            title='Annual Refill Interest (EUR)',
+            overlaying='y',
+            side='right',
+            zeroline=True,
+            zerolinewidth=1,
+            separatethousands=True,
+            automargin=True,
+            showgrid=False,
+        ),
+    )
+    fig.update_xaxes(title=x_label, type='category')
+    return plot_axis_number_format(fig, y_axes=['yaxis', 'yaxis2'])
 
 
 def _component_chart(
@@ -315,6 +490,160 @@ def _normalize_refill_logic(refill_logic_df: pd.DataFrame | None) -> pd.DataFram
     return out
 
 
+def _shifted_portfolio_refill_weights(runoff_compare_df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Infer refill allocation weights from one-month shifted portfolio delta.
+
+    We compare T2 notional per bucket against T1 shifted by one month
+    (`bucket k in T2` vs `bucket k+1 in T1`). Positive deltas represent the
+    refill demand in each tenor bucket.
+    """
+    if runoff_compare_df is None or runoff_compare_df.empty:
+        return None
+    needed = {'remaining_maturity_months', 'abs_notional_d1', 'abs_notional_d2'}
+    if not needed.issubset(runoff_compare_df.columns):
+        return None
+
+    w = runoff_compare_df.loc[:, ['remaining_maturity_months', 'abs_notional_d1', 'abs_notional_d2']].copy()
+    w['remaining_maturity_months'] = pd.to_numeric(w['remaining_maturity_months'], errors='coerce')
+    w['abs_notional_d1'] = pd.to_numeric(w['abs_notional_d1'], errors='coerce')
+    w['abs_notional_d2'] = pd.to_numeric(w['abs_notional_d2'], errors='coerce')
+    w = w.dropna().sort_values('remaining_maturity_months').drop_duplicates('remaining_maturity_months', keep='last')
+    if w.empty:
+        return None
+
+    d1 = w['abs_notional_d1'].astype(float).to_numpy()
+    d2 = w['abs_notional_d2'].astype(float).to_numpy()
+    d1_shift = np.roll(d1, -1)
+    d1_shift[-1] = 0.0
+    shift_delta = np.clip(d2 - d1_shift, a_min=0.0, a_max=None)
+
+    total = float(shift_delta.sum())
+    if total <= 1e-12:
+        fallback = np.clip(d2, a_min=0.0, a_max=None)
+        total = float(fallback.sum())
+        if total <= 1e-12:
+            return None
+        shift_delta = fallback
+
+    out = pd.DataFrame(
+        {
+            'tenor': w['remaining_maturity_months'].astype(int).to_numpy(),
+            'shift_delta': shift_delta,
+        }
+    )
+    out = out[out['shift_delta'] > 1e-12].copy()
+    if out.empty:
+        return None
+    out['weight'] = out['shift_delta'] / float(out['shift_delta'].sum())
+    return out.reset_index(drop=True)
+
+
+def _t0_portfolio_weights(runoff_compare_df: pd.DataFrame | None, *, basis: str) -> pd.Series | None:
+    """Portfolio tenor distribution for the selected T0 basis."""
+    if runoff_compare_df is None or runoff_compare_df.empty:
+        return None
+    col = 'abs_notional_d1' if str(basis).strip().upper() == 'T1' else 'abs_notional_d2'
+    needed = {'remaining_maturity_months', col}
+    if not needed.issubset(runoff_compare_df.columns):
+        return None
+
+    w = runoff_compare_df.loc[:, ['remaining_maturity_months', col]].copy()
+    w['remaining_maturity_months'] = pd.to_numeric(w['remaining_maturity_months'], errors='coerce')
+    w[col] = pd.to_numeric(w[col], errors='coerce').clip(lower=0.0)
+    w = w.dropna().groupby('remaining_maturity_months', as_index=False).sum()
+    if w.empty:
+        return None
+    total = float(w[col].sum())
+    if total <= 1e-12:
+        return None
+    s = w.set_index('remaining_maturity_months')[col].astype(float)
+    return s / total
+
+
+def _growth_outstanding_profile(
+    *,
+    growth_flow: pd.Series,
+    runoff_compare_df: pd.DataFrame | None,
+    basis: str,
+) -> pd.Series:
+    """Convert monthly growth injections into outstanding cumulative growth profile.
+
+    Uses T0 tenor distribution as survival curve so growth rolls off with maturities.
+    Fallback (no weights): simple cumulative sum of growth flow.
+    """
+    flow = growth_flow.astype(float).clip(lower=0.0)
+    if flow.empty:
+        return flow
+    if float(flow.sum()) <= 1e-12:
+        return pd.Series(0.0, index=flow.index, dtype=float)
+
+    weights = _t0_portfolio_weights(runoff_compare_df, basis=basis)
+    if weights is None or weights.empty:
+        return flow.cumsum()
+
+    tenor = weights.index.astype(int).to_numpy()
+    w = weights.astype(float).to_numpy()
+    w_sum = float(w.sum())
+    if w_sum <= 1e-12:
+        return flow.cumsum()
+    w = w / w_sum
+
+    n = len(flow)
+    survival = np.zeros(n, dtype=float)
+    for lag in range(n):
+        survival[lag] = float(w[tenor >= lag].sum())
+
+    outstanding = np.convolve(flow.to_numpy(dtype=float), survival, mode='full')[:n]
+    return pd.Series(outstanding, index=flow.index, dtype=float)
+
+
+def _curve_rate_by_tenor(
+    *,
+    tenor_points: pd.Series,
+    base_notional_total: pd.Series,
+    base_effective_total: pd.Series,
+    curve_df: pd.DataFrame | None = None,
+    basis_date: pd.Timestamp | None = None,
+) -> pd.Series:
+    """Return annualized curve rate by tenor; fallback to observed ratio."""
+    idx = base_notional_total.index
+    eff_rate = pd.Series(0.0, index=idx, dtype=float)
+    tenor = pd.Series(tenor_points, index=idx).astype(float).round().astype(int)
+    curve_rate = None
+
+    if curve_df is not None and basis_date is not None and not curve_df.empty:
+        c = curve_df.copy()
+        c.columns = [str(col).strip().lower() for col in c.columns]
+        needed_cols = {'ir_date', 'ir_tenor', 'rate'}
+        if needed_cols.issubset(c.columns):
+            c['ir_date'] = pd.to_datetime(c['ir_date'])
+            c['ir_tenor'] = pd.to_numeric(c['ir_tenor'], errors='coerce')
+            c['rate'] = pd.to_numeric(c['rate'], errors='coerce')
+            c = c.dropna(subset=['ir_date', 'ir_tenor', 'rate']).copy()
+            if not c.empty:
+                as_of = pd.Timestamp(basis_date) + pd.offsets.MonthEnd(0)
+                prior = c[c['ir_date'] <= as_of]
+                curve_date = c['ir_date'].min() if prior.empty else prior['ir_date'].max()
+                cs = c[c['ir_date'] == curve_date].copy()
+                cs = cs.sort_values('ir_tenor').drop_duplicates('ir_tenor', keep='last')
+                if len(cs) >= 2:
+                    x = cs['ir_tenor'].astype(float).to_numpy()
+                    y = cs['rate'].astype(float).to_numpy()
+                    q = tenor.astype(float).to_numpy()
+                    curve_rate = pd.Series(np.interp(q, x, y), index=idx, dtype=float)
+                elif len(cs) == 1:
+                    curve_rate = pd.Series(float(cs['rate'].iloc[0]), index=idx, dtype=float)
+
+    if curve_rate is None:
+        non_zero = base_notional_total.abs() > 1e-12
+        eff_rate.loc[non_zero] = (
+            base_effective_total.loc[non_zero] / base_notional_total.loc[non_zero]
+        ).astype(float)
+    else:
+        eff_rate = curve_rate.astype(float)
+    return eff_rate
+
+
 def _build_refill_series(
     *,
     base_notional_total: pd.Series,
@@ -427,15 +756,19 @@ def _compute_refill_growth_components(
     growth_per_step = float(monthly_growth_amount) if mode == 'user_defined' else 0.0
     growth_per_step = max(growth_per_step, 0.0)
 
-    target_total = pd.Series(base_level, index=idx, dtype=float) + steps * growth_per_step
-    total_required = (target_total - cumulative_notional).clip(lower=0.0)
     refill_required = (pd.Series(base_level, index=idx, dtype=float) - cumulative_notional).clip(lower=0.0)
-    growth_required = (total_required - refill_required).clip(lower=0.0)
+    growth_required = pd.Series(growth_per_step, index=idx, dtype=float)
+    total_required = refill_required + growth_required
+    target_total = cumulative_notional + total_required
 
     first = idx[0]
-    total_required.loc[first] = 0.0
     refill_required.loc[first] = 0.0
-    growth_required.loc[first] = 0.0
+    if mode == 'user_defined':
+        growth_required.loc[first] = 0.0
+    else:
+        growth_required.loc[:] = 0.0
+    total_required = refill_required + growth_required
+    target_total = cumulative_notional + total_required
 
     return {
         'target_total': target_total,
@@ -443,6 +776,43 @@ def _compute_refill_growth_components(
         'refill_required': refill_required,
         'growth_required': growth_required,
     }
+
+
+def _compute_refill_growth_components_anchor_safe(
+    *,
+    cumulative_notional: pd.Series,
+    growth_mode: str,
+    monthly_growth_amount: float,
+) -> dict[str, pd.Series]:
+    """Compute refill/growth requirements while tolerating leading anchor zeros.
+
+    Calendar mode can include a leading anchor month with zero cumulative notional.
+    Refill sizing should start from the first non-zero month, while keeping anchor
+    rows at zero required refill/growth.
+    """
+    series = cumulative_notional.astype(float)
+    non_zero_pos = np.flatnonzero(series.abs().to_numpy() > 1e-12)
+    if non_zero_pos.size == 0:
+        return _compute_refill_growth_components(
+            cumulative_notional=series,
+            growth_mode=growth_mode,
+            monthly_growth_amount=monthly_growth_amount,
+        )
+
+    start = int(non_zero_pos[0])
+    active = series.iloc[start:]
+    components = _compute_refill_growth_components(
+        cumulative_notional=active,
+        growth_mode=growth_mode,
+        monthly_growth_amount=monthly_growth_amount,
+    )
+
+    out: dict[str, pd.Series] = {}
+    for key, values in components.items():
+        aligned = pd.Series(0.0, index=series.index, dtype=float)
+        aligned.loc[active.index] = values.astype(float).to_numpy()
+        out[key] = aligned
+    return out
 
 
 def _build_aggregation_windows(month_ends: pd.Series, window_mode: str) -> list[tuple[str, pd.Series]]:
@@ -733,37 +1103,57 @@ def render_runoff_delta_charts(
     cum_notional_added = abs_notional_added[::-1].cumsum()[::-1]
     cum_notional_matured = abs_notional_matured[::-1].cumsum()[::-1]
     cum_notional_total = abs_notional_total[::-1].cumsum()[::-1]
-    refill_required = pd.Series(0.0, index=active_df.index, dtype=float)
-    growth_required = pd.Series(0.0, index=active_df.index, dtype=float)
-    refill_effective = pd.Series(0.0, index=active_df.index, dtype=float)
-    growth_effective = pd.Series(0.0, index=active_df.index, dtype=float)
-    refill_title_suffix = 'Refill'
-    refill_series = _build_refill_series(
+    cum_notional_existing_chart = notional_existing[::-1].cumsum()[::-1]
+    cum_notional_added_chart = notional_added[::-1].cumsum()[::-1]
+    cum_notional_matured_chart = notional_matured[::-1].cumsum()[::-1]
+    if basis == 'T1':
+        cum_notional_total_chart = _first_available(
+            ['cumulative_signed_notional_d1', 'cumulative_abs_notional_d1']
+        )
+    else:
+        cum_notional_total_chart = _first_available(
+            ['cumulative_signed_notional_d2', 'cumulative_abs_notional_d2']
+        )
+    growth_components = _compute_refill_growth_components_anchor_safe(
+        cumulative_notional=cum_notional_total_chart.astype(float),
+        growth_mode=growth_mode,
+        monthly_growth_amount=monthly_growth_amount,
+    )
+    refill_required = growth_components['refill_required']
+    growth_required = growth_components['growth_required']
+    growth_outstanding = _growth_outstanding_profile(
+        growth_flow=growth_required,
+        runoff_compare_df=compare_df,
+        basis=basis,
+    )
+    refill_rate = _curve_rate_by_tenor(
+        tenor_points=active_df['remaining_maturity_months'].astype(float),
         base_notional_total=abs_notional_total.astype(float),
         base_effective_total=nc_total.astype(float),
-        tenor_points=active_df['remaining_maturity_months'].astype(float),
-        refill_logic_df=refill_logic_df,
         curve_df=curve_df,
         basis_date=(pd.Timestamp(basis_t1) if basis == 'T1' and basis_t1 is not None else pd.Timestamp(basis_t2) if basis_t2 is not None else None),
     )
-    if refill_series is not None:
-        growth_components = _compute_refill_growth_components(
-            cumulative_notional=cum_notional_total.astype(float),
-            growth_mode=growth_mode,
-            monthly_growth_amount=monthly_growth_amount,
-        )
-        refill_required = growth_components['refill_required']
-        growth_required = growth_components['growth_required']
-        refill_rate = refill_series['curve_rate'].astype(float)
-        refill_effective = refill_required * refill_rate * (30.0 / 360.0)
-        growth_effective = growth_required * refill_rate * (30.0 / 360.0)
-        if str(growth_mode).strip().lower() == 'user_defined' and float(monthly_growth_amount) > 0.0:
-            refill_title_suffix = f'Refill + Growth ({monthly_growth_amount:,.2f}/month)'
-    include_refill_views = refill_series is not None
+    refill_effective = refill_required * refill_rate * (30.0 / 360.0)
+    growth_effective = growth_outstanding * refill_rate * (30.0 / 360.0)
+    refill_title_suffix = 'Refill'
+    if str(growth_mode).strip().lower() == 'user_defined' and float(monthly_growth_amount) > 0.0:
+        refill_title_suffix = f'Refill + Growth ({monthly_growth_amount:,.2f}/month)'
+    include_refill_views = True
     selected_view = coerce_option(
         chart_view,
         _available_runoff_chart_options(include_refill_views),
         'Notional Decomposition',
+    )
+    if basis == 'T1' and basis_t1 is not None:
+        basis_date = pd.Timestamp(basis_t1)
+    elif basis_t2 is not None:
+        basis_date = pd.Timestamp(basis_t2)
+    elif basis_t1 is not None:
+        basis_date = pd.Timestamp(basis_t1)
+    else:
+        basis_date = pd.Timestamp.today().normalize()
+    month_ends = active_df['remaining_maturity_months'].astype(int).apply(
+        lambda m: (basis_date + pd.offsets.MonthEnd(int(m))).normalize()
     )
 
     if selected_view == 'Notional Decomposition':
@@ -862,49 +1252,62 @@ def render_runoff_delta_charts(
         )
         st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_effective')
     elif selected_view == 'Cumulative Notional (Refill/Growth)' and include_refill_views:
-        refill_notional_total = cum_notional_total + refill_required + growth_required
+        refill_notional_total = cum_notional_total_chart + refill_required + growth_outstanding
         fig = _component_chart(
             x=active_df['remaining_maturity_months'],
-            y_existing=cum_notional_existing,
-            y_added=cum_notional_added,
+            y_existing=cum_notional_existing_chart,
+            y_added=cum_notional_added_chart,
             y_refilled=refill_required,
-            y_growth=growth_required,
-            y_matured=cum_notional_matured,
+            y_growth=growth_outstanding,
+            y_matured=cum_notional_matured_chart,
             y_total=refill_notional_total,
             y_cumulative=None,
-            title=f'Runoff Buckets: Cumulative Notional ({refill_title_suffix}, {basis})',
+            title=f'Runoff Buckets: Cumulative Notional Decomposition ({refill_title_suffix}, {basis})',
             x_label='Remaining Maturity (Months)',
-            y_label='Cumulative Abs Notional',
-            cumulative_label='Cumulative Abs Notional',
+            y_label='Cumulative Notional',
+            cumulative_label='Cumulative Notional',
         )
         st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_cumulative')
+    elif selected_view == 'Refill Allocation Heatmap' and include_refill_views:
+        fig = _refill_allocation_heatmap(
+            month_ends=month_ends,
+            refill_required=refill_required,
+            growth_required=growth_required,
+            growth_mode=growth_mode,
+            basis=basis,
+            runoff_compare_df=compare_df,
+            title=f'Refill Allocation by Month and Tenor (Shifted Delta, {refill_title_suffix}, {basis})',
+            x_label='Calendar Month End',
+        )
+        if fig is None:
+            st.info('Refill allocation heatmap unavailable: could not derive shifted one-month delta weights.')
+        else:
+            st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_allocation_heatmap')
+            refill_line = _refill_volume_interest_chart(
+                month_ends=month_ends,
+                refill_required=refill_required,
+                growth_volume=growth_outstanding,
+                refill_rate=refill_rate,
+                title=f'Refill Volume and Annual Interest ({refill_title_suffix}, {basis})',
+                x_label='Calendar Month End',
+            )
+            st.plotly_chart(refill_line, use_container_width=True, key=f'{key_prefix}_refill_volume_interest')
     else:
         fig = _component_chart(
             x=active_df['remaining_maturity_months'],
-            y_existing=cum_notional_existing,
-            y_added=cum_notional_added,
-            y_matured=cum_notional_matured,
-            y_total=cum_notional_total,
+            y_existing=cum_notional_existing_chart,
+            y_added=cum_notional_added_chart,
+            y_matured=cum_notional_matured_chart,
+            y_total=cum_notional_total_chart,
             y_cumulative=None,
             title=f'Runoff Buckets: Cumulative Notional Decomposition ({basis})',
             x_label='Remaining Maturity (Months)',
-            y_label='Cumulative Abs Notional',
-            cumulative_label='Cumulative Abs Notional',
+            y_label='Cumulative Notional',
+            cumulative_label='Cumulative Notional',
         )
         st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_cumulative')
 
-    if basis == 'T1' and basis_t1 is not None:
-        basis_date = pd.Timestamp(basis_t1)
-    elif basis_t2 is not None:
-        basis_date = pd.Timestamp(basis_t2)
-    elif basis_t1 is not None:
-        basis_date = pd.Timestamp(basis_t1)
-    else:
-        basis_date = pd.Timestamp.today().normalize()
-    month_ends = active_df['remaining_maturity_months'].astype(int).apply(
-        lambda m: (basis_date + pd.offsets.MonthEnd(int(m))).normalize()
-    )
-    notional_total_for_table = cum_notional_total + refill_required + growth_required
+    notional_total_for_table = cum_notional_total + refill_required + growth_outstanding
     effective_total_for_table = nc_total + refill_effective + growth_effective
     with st.expander('Runoff 5Y Aggregation', expanded=False):
         _render_aggregation_table(
@@ -913,7 +1316,7 @@ def render_runoff_delta_charts(
             notional_added=cum_notional_added,
             notional_matured_effect=-cum_notional_matured,
             notional_refilled=refill_required,
-            notional_growth=growth_required,
+            notional_growth=growth_outstanding,
             notional_total=notional_total_for_table,
             effective_existing=nc_existing,
             effective_added=nc_added,
@@ -1023,34 +1426,42 @@ def render_calendar_runoff_charts(
     cum_notional_added = abs_notional_added[::-1].cumsum()[::-1]
     cum_notional_matured = abs_notional_matured[::-1].cumsum()[::-1]
     cum_notional_total = abs_notional_total[::-1].cumsum()[::-1]
-    refill_required = pd.Series(0.0, index=df.index, dtype=float)
-    growth_required = pd.Series(0.0, index=df.index, dtype=float)
-    refill_effective = pd.Series(0.0, index=df.index, dtype=float)
-    growth_effective = pd.Series(0.0, index=df.index, dtype=float)
-    refill_title_suffix = 'Refill'
-    tenor_points = pd.Series(range(1, len(df) + 1), index=df.index, dtype=float)
-    refill_series = _build_refill_series(
+    cum_notional_existing_chart = notional_existing[::-1].cumsum()[::-1]
+    cum_notional_added_chart = notional_added[::-1].cumsum()[::-1]
+    cum_notional_matured_chart = notional_matured[::-1].cumsum()[::-1]
+    if is_t1_basis:
+        cum_notional_total_chart = _first_available(
+            ['cumulative_signed_notional_t1', 'cumulative_abs_notional_t1']
+        )
+    else:
+        cum_notional_total_chart = _first_available(
+            ['cumulative_signed_notional_t2', 'cumulative_abs_notional_t2']
+        )
+    growth_components = _compute_refill_growth_components_anchor_safe(
+        cumulative_notional=cum_notional_total_chart.astype(float),
+        growth_mode=growth_mode,
+        monthly_growth_amount=monthly_growth_amount,
+    )
+    refill_required = growth_components['refill_required']
+    growth_required = growth_components['growth_required']
+    growth_outstanding = _growth_outstanding_profile(
+        growth_flow=growth_required,
+        runoff_compare_df=runoff_compare_df,
+        basis=basis,
+    )
+    refill_rate = _curve_rate_by_tenor(
+        tenor_points=pd.Series(range(1, len(df) + 1), index=df.index, dtype=float),
         base_notional_total=abs_notional_total.astype(float),
         base_effective_total=nc_total.astype(float),
-        tenor_points=tenor_points,
-        refill_logic_df=refill_logic_df,
         curve_df=curve_df,
         basis_date=(pd.Timestamp(basis_t1) if is_t1_basis and basis_t1 is not None else pd.Timestamp(basis_t2) if basis_t2 is not None else None),
     )
-    if refill_series is not None:
-        growth_components = _compute_refill_growth_components(
-            cumulative_notional=cum_notional_total.astype(float),
-            growth_mode=growth_mode,
-            monthly_growth_amount=monthly_growth_amount,
-        )
-        refill_required = growth_components['refill_required']
-        growth_required = growth_components['growth_required']
-        refill_rate = refill_series['curve_rate'].astype(float)
-        refill_effective = refill_required * refill_rate * (30.0 / 360.0)
-        growth_effective = growth_required * refill_rate * (30.0 / 360.0)
-        if str(growth_mode).strip().lower() == 'user_defined' and float(monthly_growth_amount) > 0.0:
-            refill_title_suffix = f'Refill + Growth ({monthly_growth_amount:,.2f}/month)'
-    include_refill_views = refill_series is not None
+    refill_effective = refill_required * refill_rate * (30.0 / 360.0)
+    growth_effective = growth_outstanding * refill_rate * (30.0 / 360.0)
+    refill_title_suffix = 'Refill'
+    if str(growth_mode).strip().lower() == 'user_defined' and float(monthly_growth_amount) > 0.0:
+        refill_title_suffix = f'Refill + Growth ({monthly_growth_amount:,.2f}/month)'
+    include_refill_views = True
     selected_view = coerce_option(
         chart_view,
         _available_runoff_chart_options(include_refill_views),
@@ -1197,38 +1608,62 @@ def render_calendar_runoff_charts(
         )
         st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_effective')
     elif selected_view == 'Cumulative Notional (Refill/Growth)' and include_refill_views:
-        refill_notional_total = cum_notional_total + refill_required + growth_required
+        refill_notional_total = cum_notional_total_chart + refill_required + growth_outstanding
         fig = _component_chart(
             x=x_vals,
-            y_existing=cum_notional_existing,
-            y_added=cum_notional_added,
+            y_existing=cum_notional_existing_chart,
+            y_added=cum_notional_added_chart,
             y_refilled=refill_required,
-            y_growth=growth_required,
-            y_matured=cum_notional_matured,
+            y_growth=growth_outstanding,
+            y_matured=cum_notional_matured_chart,
             y_total=refill_notional_total,
             y_cumulative=None,
-            title=f'Runoff by Calendar Month: Cumulative Notional ({refill_title_suffix}, {basis})',
+            title=f'Runoff by Calendar Month: Cumulative Notional Decomposition ({refill_title_suffix}, {basis})',
             x_label='Calendar Month End',
-            y_label='Cumulative Abs Notional',
-            cumulative_label='Cumulative Abs Notional',
+            y_label='Cumulative Notional',
+            cumulative_label='Cumulative Notional',
         )
         st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_cumulative')
+    elif selected_view == 'Refill Allocation Heatmap' and include_refill_views:
+        fig = _refill_allocation_heatmap(
+            month_ends=df['calendar_month_end'],
+            refill_required=refill_required,
+            growth_required=growth_required,
+            growth_mode=growth_mode,
+            basis=basis,
+            runoff_compare_df=runoff_compare_df,
+            title=f'Refill Allocation by Calendar Month and Tenor (Shifted Delta, {refill_title_suffix}, {basis})',
+            x_label='Calendar Month End',
+        )
+        if fig is None:
+            st.info('Refill allocation heatmap unavailable: could not derive shifted one-month delta weights.')
+        else:
+            st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_allocation_heatmap')
+            refill_line = _refill_volume_interest_chart(
+                month_ends=df['calendar_month_end'],
+                refill_required=refill_required,
+                growth_volume=growth_outstanding,
+                refill_rate=refill_rate,
+                title=f'Refill Volume and Annual Interest ({refill_title_suffix}, {basis})',
+                x_label='Calendar Month End',
+            )
+            st.plotly_chart(refill_line, use_container_width=True, key=f'{key_prefix}_refill_volume_interest')
     else:
         fig = _component_chart(
             x=x_vals,
-            y_existing=cum_notional_existing,
-            y_added=cum_notional_added,
-            y_matured=cum_notional_matured,
-            y_total=cum_notional_total,
+            y_existing=cum_notional_existing_chart,
+            y_added=cum_notional_added_chart,
+            y_matured=cum_notional_matured_chart,
+            y_total=cum_notional_total_chart,
             y_cumulative=None,
             title=f'Runoff Buckets by Calendar Month: Cumulative Notional Decomposition ({basis})',
             x_label='Calendar Month End',
-            y_label='Cumulative Abs Notional',
-            cumulative_label='Cumulative Abs Notional',
+            y_label='Cumulative Notional',
+            cumulative_label='Cumulative Notional',
         )
         st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_cumulative')
 
-    notional_total_for_table = cum_notional_total + refill_required + growth_required
+    notional_total_for_table = cum_notional_total + refill_required + growth_outstanding
     effective_total_for_table = nc_total + refill_effective + growth_effective
     with st.expander('Runoff 5Y Aggregation', expanded=False):
         _render_aggregation_table(
@@ -1237,7 +1672,7 @@ def render_calendar_runoff_charts(
             notional_added=cum_notional_added,
             notional_matured_effect=-cum_notional_matured,
             notional_refilled=refill_required,
-            notional_growth=growth_required,
+            notional_growth=growth_outstanding,
             notional_total=notional_total_for_table,
             effective_existing=nc_existing,
             effective_added=nc_added,

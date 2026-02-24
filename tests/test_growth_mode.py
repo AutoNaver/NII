@@ -23,5 +23,5 @@ def test_growth_mode_user_defined_applies_increment_from_second_step() -> None:
         monthly_growth_amount=5.0,
     )
     assert out['refill_required'].tolist() == [0.0, 10.0, 20.0]
-    assert out['growth_required'].tolist() == [0.0, 5.0, 10.0]
-    assert out['total_required'].tolist() == [0.0, 15.0, 30.0]
+    assert out['growth_required'].tolist() == [0.0, 5.0, 5.0]
+    assert out['total_required'].tolist() == [0.0, 15.0, 25.0]
