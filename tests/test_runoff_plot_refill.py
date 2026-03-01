@@ -75,6 +75,25 @@ def test_refill_volume_interest_chart_has_dual_axes_traces() -> None:
     assert fig.data[5].yaxis == 'y2'
 
 
+def test_refill_volume_interest_chart_preserves_negative_signed_flows() -> None:
+    month_ends = pd.to_datetime(['2025-01-31', '2025-02-28', '2025-03-31'])
+    refill_required = pd.Series([0.0, -20.0, -30.0], dtype=float)
+    growth_required = pd.Series([0.0, -5.0, -5.0], dtype=float)
+    refill_rate = pd.Series([0.1, 0.2, 0.3], dtype=float)
+    fig = _refill_volume_interest_chart(
+        month_ends=month_ends,
+        refill_required=refill_required,
+        growth_volume=growth_required,
+        refill_rate=refill_rate,
+        title='t',
+        x_label='x',
+    )
+    assert min(fig.data[0].y) < 0.0
+    assert min(fig.data[1].y) < 0.0
+    assert min(fig.data[2].y) < 0.0
+    assert min(fig.data[3].y) < 0.0
+
+
 def test_refill_allocation_heatmap_user_defined_includes_growth_with_t0_distribution() -> None:
     compare = pd.DataFrame(
         {
@@ -153,3 +172,20 @@ def test_growth_outstanding_profile_uses_t0_survival_weights() -> None:
     # survival lags: [1.0, 0.5, 0.5]
     # outstanding: [0, 10, 15]
     assert out.tolist() == [0.0, 10.0, 15.0]
+
+
+def test_growth_outstanding_profile_preserves_negative_liability_growth() -> None:
+    compare = pd.DataFrame(
+        {
+            'remaining_maturity_months': [0, 2],
+            'abs_notional_d1': [50.0, 50.0],
+            'abs_notional_d2': [0.0, 0.0],
+        }
+    )
+    flow = pd.Series([0.0, -10.0, -10.0], dtype=float)
+    out = _growth_outstanding_profile(
+        growth_flow=flow,
+        runoff_compare_df=compare,
+        basis='T1',
+    )
+    assert out.tolist() == [0.0, -10.0, -15.0]

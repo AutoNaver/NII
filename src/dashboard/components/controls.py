@@ -58,11 +58,27 @@ def _stable_selectbox(
     current = coerce_option(st.session_state.get(key, default), options, default)
     st.session_state[key] = current
     idx = options.index(current)
+    if format_func is None:
+        return st.selectbox(label, options, index=idx, key=key)
     return st.selectbox(label, options, index=idx, key=key, format_func=format_func)
 
 
-def render_global_controls(month_ends: list[pd.Timestamp]) -> dict[str, Any]:
+def render_global_controls(
+    month_ends: list[pd.Timestamp],
+    products: list[str] | None = None,
+    default_product: str | None = None,
+) -> dict[str, Any]:
     """Render fixed sidebar controls and return normalized UI state."""
+    products = products or []
+    if products:
+        product_default = coerce_option(
+            default_product if default_product is not None else st.session_state.get('global_product', products[0]),
+            products,
+            products[0],
+        )
+    else:
+        product_default = default_product
+
     t1_idx, t2_idx = default_month_view_indices(month_ends)
     t1_default = month_ends[t1_idx] if month_ends else None
     t2_default = month_ends[t2_idx] if month_ends else None
@@ -73,6 +89,15 @@ def render_global_controls(month_ends: list[pd.Timestamp]) -> dict[str, Any]:
         if st.button('Refresh Cached Calculations', key='global_refresh_cached_calculations'):
             st.cache_data.clear()
             st.rerun()
+        if products:
+            product = _stable_selectbox(
+                label='Product',
+                options=products,
+                key='global_product',
+                default=product_default,
+            )
+        else:
+            product = product_default
 
         if month_ends:
             t1 = _stable_selectbox(
@@ -134,6 +159,7 @@ def render_global_controls(month_ends: list[pd.Timestamp]) -> dict[str, Any]:
 
     return {
         'input_path': input_path,
+        'product': product,
         't1': t1,
         't2_enabled': t2_enabled,
         't2': t2,
@@ -175,8 +201,15 @@ def render_runoff_controls(default_basis: str = 'T2') -> dict[str, Any]:
     with c2:
         st.caption(f'Decomposition basis: {st.session_state.get("runoff_decomposition_basis", default_basis)}')
         st.caption('Buckets = remaining maturity; Monthly View = T1/T2.')
+        flip_y_axis = st.checkbox(
+            'Flip y-axis orientation',
+            value=bool(st.session_state.get('runoff_flip_y_axis', False)),
+            key='runoff_flip_y_axis',
+            help='Visual-only orientation flip. Signed values are unchanged.',
+        )
 
     return {
         'runoff_chart_view': runoff_chart_view,
         'runoff_decomposition_basis': st.session_state.get('runoff_decomposition_basis', default_basis),
+        'flip_y_axis': flip_y_axis,
     }

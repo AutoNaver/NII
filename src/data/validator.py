@@ -29,7 +29,10 @@ def validate_deals(df: pd.DataFrame) -> list[str]:
 
     warnings: list[str] = []
 
-    if df['deal_id'].duplicated().any():
+    if 'product' in df.columns:
+        if df.duplicated(subset=['product', 'deal_id']).any():
+            raise ValueError('Duplicate deal_id values found within product.')
+    elif df['deal_id'].duplicated().any():
         raise ValueError('Duplicate deal_id values found.')
 
     for col in ['trade_date', 'value_date', 'maturity_date']:

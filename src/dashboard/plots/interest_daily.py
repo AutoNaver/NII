@@ -87,6 +87,12 @@ def _padded_range(
     return (lo - pad, hi + pad)
 
 
+def _maybe_flip_range(lo: float, hi: float, flip_y_axis: bool) -> list[float]:
+    if flip_y_axis:
+        return [float(hi), float(lo)]
+    return [float(lo), float(hi)]
+
+
 def _delta_colors(values: pd.Series) -> list[str]:
     colors: list[str] = []
     for value in values.astype(float):
@@ -145,6 +151,7 @@ def _plot_daily_metric(
     cumulative_label: str,
     include_bottom_cumulative: bool = False,
     include_top_cumulative_total: bool = False,
+    flip_y_axis: bool = False,
 ) -> None:
     df = df.sort_values('date').copy()
     total_col = f'{metric_prefix}_total'
@@ -160,13 +167,20 @@ def _plot_daily_metric(
     df['cumulative_matured'] = df[matured_col].cumsum()
     df['cumulative_added_matured_aggregate'] = (df[added_col] + df[matured_col]).cumsum()
 
-    _, primary_top_max = _padded_range(
+    top_lo, top_hi = _padded_range(
         [df[total_col], baseline_series],
         include_zero=True,
         pad_ratio=0.12,
     )
-    primary_top_min = 0.0
-    primary_top_max = max(primary_top_max, 1.0)
+    if top_hi <= 0.0:
+        primary_top_min = min(top_lo, -1.0)
+        primary_top_max = 0.0
+    elif top_lo >= 0.0:
+        primary_top_min = 0.0
+        primary_top_max = max(top_hi, 1.0)
+    else:
+        primary_top_min = top_lo
+        primary_top_max = top_hi
     primary_bottom_min, primary_bottom_max = _padded_range(
         [df[added_col], df[matured_col]],
         include_zero=True,
@@ -314,7 +328,7 @@ def _plot_daily_metric(
         row=1,
         col=1,
         secondary_y=False,
-        range=[primary_top_min, primary_top_max],
+        range=_maybe_flip_range(primary_top_min, primary_top_max, flip_y_axis),
         separatethousands=True,
         title_standoff=24,
         title_font=dict(size=12),
@@ -326,7 +340,7 @@ def _plot_daily_metric(
             row=1,
             col=1,
             secondary_y=True,
-            range=[sec_top_lo, sec_top_hi],
+            range=_maybe_flip_range(sec_top_lo, sec_top_hi, flip_y_axis),
             showgrid=False,
             zeroline=True,
             zerolinewidth=1,
@@ -340,7 +354,7 @@ def _plot_daily_metric(
         row=2,
         col=1,
         secondary_y=False,
-        range=[primary_bottom_min, primary_bottom_max],
+        range=_maybe_flip_range(primary_bottom_min, primary_bottom_max, flip_y_axis),
         zeroline=True,
         zerolinewidth=1,
         separatethousands=True,
@@ -354,7 +368,7 @@ def _plot_daily_metric(
             row=2,
             col=1,
             secondary_y=True,
-            range=[sec_bottom_lo, sec_bottom_hi],
+            range=_maybe_flip_range(sec_bottom_lo, sec_bottom_hi, flip_y_axis),
             showgrid=False,
             zeroline=True,
             zerolinewidth=1,
@@ -405,6 +419,13 @@ def render_daily_interest_chart(daily_t1: pd.DataFrame, daily_t2: pd.DataFrame, 
         horizontal=True,
         key=chart_key,
     )
+    flip_y_axis_key = 'daily_flip_y_axis'
+    flip_y_axis = st.checkbox(
+        'Flip y-axis orientation',
+        value=bool(st.session_state.get(flip_y_axis_key, False)),
+        key=flip_y_axis_key,
+        help='Visual-only orientation flip. Signed values are unchanged.',
+    )
     selected_df = daily_t1 if option == label_t1 else daily_t2
 
     if chart_view == 'Daily Notional Decomposition':
@@ -416,6 +437,7 @@ def render_daily_interest_chart(daily_t1: pd.DataFrame, daily_t2: pd.DataFrame, 
             cumulative_label='Cumulative Notional (EUR)',
             include_bottom_cumulative=False,
             include_top_cumulative_total=False,
+            flip_y_axis=flip_y_axis,
         )
         return
 
@@ -428,6 +450,7 @@ def render_daily_interest_chart(daily_t1: pd.DataFrame, daily_t2: pd.DataFrame, 
             cumulative_label='Cumulative Interest (EUR)',
             include_bottom_cumulative=True,
             include_top_cumulative_total=True,
+            flip_y_axis=flip_y_axis,
         )
         st.caption(f'Month-End Cumulative Daily Interest Decomposition ({label_t1})')
         st.dataframe(style_numeric_table(_build_interest_cumulative_table(daily_t1)), use_container_width=True)
@@ -440,6 +463,7 @@ def render_daily_interest_chart(daily_t1: pd.DataFrame, daily_t2: pd.DataFrame, 
             cumulative_label='Cumulative Interest (EUR)',
             include_bottom_cumulative=True,
             include_top_cumulative_total=True,
+            flip_y_axis=flip_y_axis,
         )
         st.caption(f'Month-End Cumulative Daily Interest Decomposition ({label_t2})')
         st.dataframe(style_numeric_table(_build_interest_cumulative_table(daily_t2)), use_container_width=True)

@@ -47,6 +47,10 @@ def load_input_workbook(path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     deals['maturity_date'] = pd.to_datetime(deals['maturity_date'])
     deals['notional'] = pd.to_numeric(deals['notional'])
     deals['coupon'] = pd.to_numeric(deals['coupon'])
+    if 'product' not in deals.columns:
+        deals['product'] = 'Default'
+    deals['product'] = deals['product'].fillna('Default').astype(str).str.strip()
+    deals.loc[deals['product'].isin(['', 'nan', 'None']), 'product'] = 'Default'
 
     curve['ir_date'] = pd.to_datetime(curve['ir_date'])
     curve['ir_tenor'] = pd.to_numeric(curve['ir_tenor'])
