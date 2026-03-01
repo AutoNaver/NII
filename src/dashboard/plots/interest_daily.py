@@ -1,4 +1,4 @@
-"""Daily decomposition charts for interest and notional with T1/T2 toggle."""
+﻿"""Daily decomposition charts for interest and notional with T1/T2 toggle."""
 
 from __future__ import annotations
 
@@ -385,7 +385,7 @@ def _plot_daily_metric(
     )
     y_axes = ['yaxis', 'yaxis2', 'yaxis3', 'yaxis4']
     fig = plot_axis_number_format(fig, y_axes=y_axes)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 
 def render_daily_interest_chart(daily_t1: pd.DataFrame, daily_t2: pd.DataFrame, label_t1: str, label_t2: str) -> None:
@@ -453,7 +453,7 @@ def render_daily_interest_chart(daily_t1: pd.DataFrame, daily_t2: pd.DataFrame, 
             flip_y_axis=flip_y_axis,
         )
         st.caption(f'Month-End Cumulative Daily Interest Decomposition ({label_t1})')
-        st.dataframe(style_numeric_table(_build_interest_cumulative_table(daily_t1)), use_container_width=True)
+        st.dataframe(style_numeric_table(_build_interest_cumulative_table(daily_t1)), width='stretch')
     else:
         _plot_daily_metric(
             daily_t2,
@@ -466,4 +466,5 @@ def render_daily_interest_chart(daily_t1: pd.DataFrame, daily_t2: pd.DataFrame, 
             flip_y_axis=flip_y_axis,
         )
         st.caption(f'Month-End Cumulative Daily Interest Decomposition ({label_t2})')
-        st.dataframe(style_numeric_table(_build_interest_cumulative_table(daily_t2)), use_container_width=True)
+        st.dataframe(style_numeric_table(_build_interest_cumulative_table(daily_t2)), width='stretch')
+

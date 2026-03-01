@@ -353,3 +353,202 @@ def test_tenor_paths_ramp_plateaus_after_month12() -> None:
     d24 = float((m24['shocked_rate'] - m24['base_rate']) * 10000.0)
     assert round(d12, 8) == 100.0
     assert round(d24, 8) == 100.0
+
+
+def test_curve_points_base_curve_is_anchor_fixed_across_states() -> None:
+    curve = pd.DataFrame(
+        {
+            'ir_date': pd.to_datetime(['2025-01-31', '2025-07-31', '2026-01-31']),
+            'ir_tenor': [1, 1, 1],
+            'rate': [0.01, 0.02, 0.03],
+        }
+    )
+    out = simulate_rate_scenarios(
+        month_ends=pd.date_range('2025-01-31', periods=13, freq='ME'),
+        existing_contractual_interest=pd.Series([0.0] * 13, dtype=float),
+        refill_notional=pd.Series([1.0] * 13, dtype=float),
+        growth_notional=pd.Series([0.0] * 13, dtype=float),
+        tenor_months=pd.Series([1] * 13, dtype=int),
+        curve_df=curve,
+        anchor_date=pd.Timestamp('2025-01-31'),
+        scenarios=pd.DataFrame([{'scenario_id': 'ramp_up_100', 'scenario_label': 'Linear 12M +100 bps'}]),
+    )
+    cp = out['curve_points']
+    one_m = cp[(cp['scenario_id'] == 'ramp_up_100') & (cp['tenor_months'] == 1)].copy()
+    assert not one_m.empty
+    base_anchor = float(one_m[one_m['state'] == 'anchor']['base_rate'].iloc[0])
+    base_m6 = float(one_m[one_m['state'] == 'month6']['base_rate'].iloc[0])
+    base_m12 = float(one_m[one_m['state'] == 'month12']['base_rate'].iloc[0])
+    assert round(base_anchor, 8) == 0.01
+    assert round(base_m6, 8) == 0.01
+    assert round(base_m12, 8) == 0.01
+
+
+def test_manual_interpolation_with_endpoint_clamp() -> None:
+    curve = pd.DataFrame(
+        {
+            'ir_date': pd.to_datetime(['2025-01-31', '2025-01-31']),
+            'ir_tenor': [1, 120],
+            'rate': [0.01, 0.02],
+        }
+    )
+    scenarios = pd.DataFrame(
+        [
+            {
+                'scenario_id': 'custom_manual_interp',
+                'scenario_label': 'Custom Manual Interp',
+                'shock_type': 'manual',
+                'materialization': 'inst',
+                'shock_bps': None,
+                'pivot_tenor_months': None,
+                'manual_nodes': [
+                    {'tenor_months': 3, 'shock_bps': 10.0},
+                    {'tenor_months': 24, 'shock_bps': 40.0},
+                ],
+            }
+        ]
+    )
+    out = simulate_rate_scenarios(
+        month_ends=pd.date_range('2025-01-31', periods=2, freq='ME'),
+        existing_contractual_interest=pd.Series([0.0, 0.0], dtype=float),
+        refill_notional=pd.Series([1.0, 1.0], dtype=float),
+        growth_notional=pd.Series([0.0, 0.0], dtype=float),
+        tenor_months=pd.Series([1, 120], dtype=int),
+        curve_df=curve,
+        anchor_date=pd.Timestamp('2025-01-31'),
+        scenarios=scenarios,
+    )
+    scen = out['monthly_scenarios'].sort_values('month_idx')
+    # Tenor 1M clamps to first node (3M -> +10 bps); 120M clamps to last node (24M -> +40 bps).
+    assert round(float(scen.iloc[0]['shock_bps']), 8) == 10.0
+    assert round(float(scen.iloc[1]['shock_bps']), 8) == 40.0
+
+
+def test_manual_instant_vs_ramp_paths_differ_and_ramp_plateaus() -> None:
+    curve = pd.DataFrame(
+        {
+            'ir_date': pd.to_datetime(['2025-01-31', '2025-01-31']),
+            'ir_tenor': [1, 120],
+            'rate': [0.01, 0.02],
+        }
+    )
+    manual_nodes = [{'tenor_months': 1, 'shock_bps': 30.0}, {'tenor_months': 120, 'shock_bps': 30.0}]
+    scenarios = pd.DataFrame(
+        [
+            {
+                'scenario_id': 'custom_manual_inst',
+                'scenario_label': 'Custom Manual Instant',
+                'shock_type': 'manual',
+                'materialization': 'inst',
+                'shock_bps': None,
+                'pivot_tenor_months': None,
+                'manual_nodes': manual_nodes,
+            },
+            {
+                'scenario_id': 'custom_manual_ramp',
+                'scenario_label': 'Custom Manual Ramp',
+                'shock_type': 'manual',
+                'materialization': 'ramp',
+                'shock_bps': None,
+                'pivot_tenor_months': None,
+                'manual_nodes': manual_nodes,
+            },
+        ]
+    )
+    out = simulate_rate_scenarios(
+        month_ends=pd.date_range('2025-01-31', periods=25, freq='ME'),
+        existing_contractual_interest=pd.Series([0.0] * 25, dtype=float),
+        refill_notional=pd.Series([1.0] * 25, dtype=float),
+        growth_notional=pd.Series([0.0] * 25, dtype=float),
+        tenor_months=pd.Series([12] * 25, dtype=int),
+        curve_df=curve,
+        anchor_date=pd.Timestamp('2025-01-31'),
+        scenarios=scenarios,
+    )
+    scen = out['monthly_scenarios']
+    inst_m0 = scen[(scen['scenario_id'] == 'custom_manual_inst') & (scen['month_idx'] == 0)].iloc[0]
+    ramp_m0 = scen[(scen['scenario_id'] == 'custom_manual_ramp') & (scen['month_idx'] == 0)].iloc[0]
+    ramp_m12 = scen[(scen['scenario_id'] == 'custom_manual_ramp') & (scen['month_idx'] == 12)].iloc[0]
+    ramp_m24 = scen[(scen['scenario_id'] == 'custom_manual_ramp') & (scen['month_idx'] == 24)].iloc[0]
+    assert round(float(inst_m0['shock_bps']), 8) == 30.0
+    assert round(float(ramp_m0['shock_bps']), 8) == 0.0
+    assert round(float(ramp_m12['shock_bps']), 8) == 30.0
+    assert round(float(ramp_m24['shock_bps']), 8) == 30.0
+
+
+def test_mixed_builtin_and_custom_scenarios_are_accepted() -> None:
+    curve = pd.DataFrame(
+        {
+            'ir_date': pd.to_datetime(['2025-01-31', '2025-01-31']),
+            'ir_tenor': [1, 120],
+            'rate': [0.01, 0.02],
+        }
+    )
+    scenarios = pd.DataFrame(
+        [
+            {'scenario_id': 'inst_up_50', 'scenario_label': 'Instant +50 bps'},
+            {
+                'scenario_id': 'custom_manual_small',
+                'scenario_label': 'Custom Manual Small',
+                'shock_type': 'manual',
+                'materialization': 'inst',
+                'shock_bps': None,
+                'pivot_tenor_months': None,
+                'manual_nodes': [{'tenor_months': 1, 'shock_bps': 5.0}, {'tenor_months': 120, 'shock_bps': 5.0}],
+            },
+        ]
+    )
+    out = simulate_rate_scenarios(
+        month_ends=pd.date_range('2025-01-31', periods=2, freq='ME'),
+        existing_contractual_interest=pd.Series([0.0, 0.0], dtype=float),
+        refill_notional=pd.Series([1.0, 1.0], dtype=float),
+        growth_notional=pd.Series([0.0, 0.0], dtype=float),
+        tenor_months=pd.Series([12, 12], dtype=int),
+        curve_df=curve,
+        anchor_date=pd.Timestamp('2025-01-31'),
+        scenarios=scenarios,
+    )
+    ids = out['scenarios']['scenario_id'].astype(str).tolist()
+    assert 'inst_up_50' in ids
+    assert 'custom_manual_small' in ids
+
+
+def test_custom_twist_respects_configured_pivot_tenor() -> None:
+    curve = pd.DataFrame(
+        {
+            'ir_date': pd.to_datetime(['2025-01-31'] * 4),
+            'ir_tenor': [6, 12, 24, 60],
+            'rate': [0.01, 0.012, 0.014, 0.02],
+        }
+    )
+    scenarios = pd.DataFrame(
+        [
+            {
+                'scenario_id': 'custom_twist_p12',
+                'scenario_label': 'Custom Twist Pivot 12M',
+                'shock_type': 'twist',
+                'materialization': 'inst',
+                'shock_bps': 10.0,
+                'pivot_tenor_months': 12.0,
+                'manual_nodes': None,
+            }
+        ]
+    )
+    out = simulate_rate_scenarios(
+        month_ends=pd.date_range('2025-01-31', periods=2, freq='ME'),
+        existing_contractual_interest=pd.Series([0.0, 0.0], dtype=float),
+        refill_notional=pd.Series([1.0, 1.0], dtype=float),
+        growth_notional=pd.Series([0.0, 0.0], dtype=float),
+        tenor_months=pd.Series([12, 12], dtype=int),
+        curve_df=curve,
+        anchor_date=pd.Timestamp('2025-01-31'),
+        scenarios=scenarios,
+    )
+    cp = out['curve_points']
+    a = cp[(cp['scenario_id'] == 'custom_twist_p12') & (cp['state'] == 'anchor')]
+    d6 = float(((a[a['tenor_months'] == 6]['shocked_rate'] - a[a['tenor_months'] == 6]['base_rate']) * 10000.0).iloc[0])
+    d12 = float(((a[a['tenor_months'] == 12]['shocked_rate'] - a[a['tenor_months'] == 12]['base_rate']) * 10000.0).iloc[0])
+    d24 = float(((a[a['tenor_months'] == 24]['shocked_rate'] - a[a['tenor_months'] == 24]['base_rate']) * 10000.0).iloc[0])
+    assert round(d6, 8) == -10.0
+    assert round(d12, 8) == 0.0
+    assert round(d24, 8) == 10.0

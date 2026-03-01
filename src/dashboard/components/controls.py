@@ -38,11 +38,24 @@ def _stable_radio(
     key: str,
     default: str,
     horizontal: bool = True,
+    persist_key: str | None = None,
 ) -> str:
-    current = coerce_option(st.session_state.get(key, default), options, default)
-    st.session_state[key] = current
+    if persist_key and key not in st.session_state and persist_key in st.session_state:
+        default = coerce_option(st.session_state.get(persist_key), options, default)
+    if key in st.session_state:
+        current = coerce_option(st.session_state.get(key), options, default)
+        if st.session_state.get(key) != current:
+            st.session_state[key] = current
+        value = st.radio(label, options=options, horizontal=horizontal, key=key)
+        if persist_key:
+            st.session_state[persist_key] = value
+        return value
+    current = coerce_option(default, options, default)
     idx = options.index(current)
-    return st.radio(label, options=options, index=idx, horizontal=horizontal, key=key)
+    value = st.radio(label, options=options, index=idx, horizontal=horizontal, key=key)
+    if persist_key:
+        st.session_state[persist_key] = value
+    return value
 
 
 def _stable_selectbox(
@@ -52,15 +65,52 @@ def _stable_selectbox(
     key: str,
     default: Any,
     format_func=None,
+    persist_key: str | None = None,
 ) -> Any:
     if not options:
         return default
-    current = coerce_option(st.session_state.get(key, default), options, default)
-    st.session_state[key] = current
+    if persist_key and key not in st.session_state and persist_key in st.session_state:
+        default = coerce_option(st.session_state.get(persist_key), options, default)
+    if key in st.session_state:
+        current = coerce_option(st.session_state.get(key), options, default)
+        if st.session_state.get(key) != current:
+            st.session_state[key] = current
+        if format_func is None:
+            value = st.selectbox(label, options, key=key)
+        else:
+            value = st.selectbox(label, options, key=key, format_func=format_func)
+        if persist_key:
+            st.session_state[persist_key] = value
+        return value
+
+    current = coerce_option(default, options, default)
     idx = options.index(current)
     if format_func is None:
-        return st.selectbox(label, options, index=idx, key=key)
-    return st.selectbox(label, options, index=idx, key=key, format_func=format_func)
+        value = st.selectbox(label, options, index=idx, key=key)
+    else:
+        value = st.selectbox(label, options, index=idx, key=key, format_func=format_func)
+    if persist_key:
+        st.session_state[persist_key] = value
+    return value
+
+
+def _stable_checkbox(
+    *,
+    label: str,
+    key: str,
+    default: bool,
+    help: str | None = None,
+    persist_key: str | None = None,
+) -> bool:
+    if persist_key and key not in st.session_state and persist_key in st.session_state:
+        default = bool(st.session_state.get(persist_key, default))
+    if key in st.session_state:
+        value = st.checkbox(label, key=key, help=help)
+    else:
+        value = st.checkbox(label, value=bool(default), key=key, help=help)
+    if persist_key:
+        st.session_state[persist_key] = bool(value)
+    return bool(value)
 
 
 def render_global_controls(
@@ -170,9 +220,23 @@ def render_global_controls(
     }
 
 
-def render_runoff_controls(default_basis: str = 'T2') -> dict[str, Any]:
+def render_runoff_controls(
+    default_basis: str = 'T2',
+    scenario_options: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     """Render compact runoff controls above charts."""
     include_refill = bool(st.session_state.get('runoff_has_refill_views', False))
+    scenario_options = scenario_options or []
+    scenario_ids = [str(s.get('scenario_id', '')) for s in scenario_options if str(s.get('scenario_id', '')).strip()]
+    scenario_label_map = {
+        str(s.get('scenario_id', '')).strip(): str(s.get('scenario_label', '')).strip()
+        for s in scenario_options
+        if str(s.get('scenario_id', '')).strip()
+    }
+    base_scenario_id = '__base__'
+    base_scenario_label = 'Base Case (No Shock)'
+    scenario_ids = [base_scenario_id] + [sid for sid in scenario_ids if sid != base_scenario_id]
+    scenario_label_map[base_scenario_id] = base_scenario_label
     options = [
         'Notional Decomposition',
         'Effective Interest Decomposition',
@@ -197,19 +261,61 @@ def render_runoff_controls(default_basis: str = 'T2') -> dict[str, Any]:
             key='runoff_chart_view',
             default=options[0],
             horizontal=False,
+            persist_key='runoff_chart_view_persist',
         )
     with c2:
         st.caption(f'Decomposition basis: {st.session_state.get("runoff_decomposition_basis", default_basis)}')
         st.caption('Buckets = remaining maturity; Monthly View = T1/T2.')
-        flip_y_axis = st.checkbox(
-            'Flip y-axis orientation',
-            value=bool(st.session_state.get('runoff_flip_y_axis', False)),
+        flip_y_axis = _stable_checkbox(
+            label='Flip y-axis orientation',
             key='runoff_flip_y_axis',
+            default=bool(st.session_state.get('runoff_flip_y_axis_persist', False)),
             help='Visual-only orientation flip. Signed values are unchanged.',
+            persist_key='runoff_flip_y_axis_persist',
         )
+
+    runoff_scenario_compare_enabled = bool(st.session_state.get('runoff_refill_scenario_compare_enabled', False))
+    scenario_a_id = st.session_state.get('runoff_refill_scenario_a_id')
+    scenario_b_id = st.session_state.get('runoff_refill_scenario_b_id')
+    can_compare = (
+        runoff_chart_view == 'Effective Interest Decomposition (Refill/Growth)'
+        and len(scenario_ids) > 0
+    )
+    if can_compare:
+        st.caption('Scenario comparison overlays shocked totals for two selected rate scenarios.')
+        runoff_scenario_compare_enabled = _stable_checkbox(
+            label='Enable scenario comparison',
+            key='runoff_refill_scenario_compare_enabled',
+            default=runoff_scenario_compare_enabled,
+            persist_key='runoff_refill_scenario_compare_enabled_persist',
+        )
+        if runoff_scenario_compare_enabled:
+            default_a = scenario_ids[0]
+            default_b = scenario_ids[1] if len(scenario_ids) > 1 else scenario_ids[0]
+            scenario_a_id = _stable_selectbox(
+                label='Scenario A',
+                options=scenario_ids,
+                key='runoff_refill_scenario_a_id',
+                default=default_a,
+                format_func=lambda sid: scenario_label_map.get(str(sid), str(sid)),
+                persist_key='runoff_refill_scenario_a_id_persist',
+            )
+            scenario_b_id = _stable_selectbox(
+                label='Scenario B',
+                options=scenario_ids,
+                key='runoff_refill_scenario_b_id',
+                default=default_b,
+                format_func=lambda sid: scenario_label_map.get(str(sid), str(sid)),
+                persist_key='runoff_refill_scenario_b_id_persist',
+            )
+    else:
+        runoff_scenario_compare_enabled = False
 
     return {
         'runoff_chart_view': runoff_chart_view,
         'runoff_decomposition_basis': st.session_state.get('runoff_decomposition_basis', default_basis),
         'flip_y_axis': flip_y_axis,
+        'runoff_scenario_compare_enabled': bool(runoff_scenario_compare_enabled),
+        'runoff_scenario_a_id': str(scenario_a_id) if scenario_a_id else '',
+        'runoff_scenario_b_id': str(scenario_b_id) if scenario_b_id else '',
     }

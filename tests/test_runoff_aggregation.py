@@ -15,8 +15,8 @@ def test_build_aggregation_windows_next_five_years_has_y1_to_y5() -> None:
     assert int(by_name['All (Y1-Y5)'].sum()) == 60
     assert int(by_name['Y1'].sum()) == 12
     assert int(by_name['Y5'].sum()) == 12
-    assert bool(by_name['Y1'].iloc[60])
-    assert not bool(by_name['Y1'].iloc[72])
+    assert bool(by_name['Y1'].iloc[0])
+    assert not bool(by_name['Y1'].iloc[12])
 
 
 def test_build_aggregation_windows_calendar_years() -> None:

@@ -13,7 +13,7 @@ def _show_table(title: str, df: pd.DataFrame) -> None:
     if df.empty:
         st.caption('No rows')
     else:
-        st.dataframe(style_numeric_table(df), use_container_width=True)
+        st.dataframe(style_numeric_table(df), width='stretch')
 
 
 def render_deal_diff_tables(diff: dict[str, pd.DataFrame | float], compact_mode: bool = False) -> None:
@@ -46,7 +46,7 @@ def render_deal_diff_tables(diff: dict[str, pd.DataFrame | float], compact_mode:
             if num_fmt:
                 styled = styled.format(num_fmt, na_rep='-')
             st.markdown('**Consolidated Changes**')
-            st.dataframe(styled, use_container_width=True)
+            st.dataframe(styled, width='stretch')
 
     if compact_mode:
         with st.expander('Added Deals', expanded=False):
@@ -62,3 +62,4 @@ def render_deal_diff_tables(diff: dict[str, pd.DataFrame | float], compact_mode:
         _show_table('Matured/Removed Deals', diff['matured'])
         _show_table('Notional Changes', diff['notional_changed'])
         _show_table('Coupon Changes', diff['coupon_changed'])
+

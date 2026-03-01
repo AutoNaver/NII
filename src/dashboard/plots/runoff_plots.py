@@ -285,10 +285,14 @@ def _component_chart(
     cumulative_label: str,
     y_refilled: pd.Series | None = None,
     y_growth: pd.Series | None = None,
+    extra_primary_series: list[pd.Series] | None = None,
     flip_y_axis: bool = False,
 ) -> go.Figure:
     matured_effect = -y_matured
-    primary_min, primary_max = _series_range([y_existing, y_added, y_refilled, y_growth, matured_effect, y_total])
+    range_inputs = [y_existing, y_added, y_refilled, y_growth, matured_effect, y_total]
+    if extra_primary_series:
+        range_inputs.extend(extra_primary_series)
+    primary_min, primary_max = _series_range(range_inputs)
     primary_min = min(primary_min, 0.0)
     primary_max = max(primary_max, 0.0)
 
@@ -375,6 +379,137 @@ def _component_chart(
     if y_cumulative is not None:
         y_axes.append('yaxis2')
     return plot_axis_number_format(fig, y_axes=y_axes)
+
+
+def _build_scenario_total_series(
+    *,
+    base_total: pd.Series,
+    month_ends: pd.Series,
+    scenario_monthly: pd.DataFrame | None,
+    scenario_id: str,
+) -> pd.Series | None:
+    sid = str(scenario_id or '').strip()
+    if sid == '__base__':
+        out = pd.Series(base_total, dtype=float).reset_index(drop=True)
+        out.index = pd.RangeIndex(len(out))
+        return out
+    if not sid or scenario_monthly is None or scenario_monthly.empty:
+        return None
+    if 'scenario_id' not in scenario_monthly.columns or 'calendar_month_end' not in scenario_monthly.columns:
+        return None
+    if 'delta_vs_base' not in scenario_monthly.columns:
+        return None
+    scen = scenario_monthly[scenario_monthly['scenario_id'].astype(str) == sid].copy()
+    if scen.empty:
+        return None
+    scen['calendar_month_end'] = pd.to_datetime(scen['calendar_month_end'], errors='coerce') + pd.offsets.MonthEnd(0)
+    scen = scen.dropna(subset=['calendar_month_end'])
+    if scen.empty:
+        return None
+    scen = scen.sort_values('calendar_month_end').drop_duplicates('calendar_month_end', keep='last')
+    delta_by_month = scen.set_index('calendar_month_end')['delta_vs_base'].astype(float)
+    idx = pd.Series(pd.to_datetime(month_ends, errors='coerce') + pd.offsets.MonthEnd(0))
+    deltas = idx.map(delta_by_month).fillna(0.0).astype(float)
+    out = pd.Series(base_total, dtype=float).reset_index(drop=True) + deltas.reset_index(drop=True)
+    out.index = pd.RangeIndex(len(out))
+    return out
+
+
+def _build_scenario_component_series(
+    *,
+    base_component: pd.Series,
+    month_ends: pd.Series,
+    scenario_monthly: pd.DataFrame | None,
+    scenario_id: str,
+    value_column: str,
+) -> pd.Series | None:
+    sid = str(scenario_id or '').strip()
+    base = pd.Series(base_component, dtype=float).reset_index(drop=True)
+    if sid == '__base__':
+        base.index = pd.RangeIndex(len(base))
+        return base
+    if not sid or scenario_monthly is None or scenario_monthly.empty:
+        return None
+    if 'scenario_id' not in scenario_monthly.columns or 'calendar_month_end' not in scenario_monthly.columns:
+        return None
+    if value_column not in scenario_monthly.columns:
+        return None
+    scen = scenario_monthly[scenario_monthly['scenario_id'].astype(str) == sid].copy()
+    if scen.empty:
+        return None
+    scen['calendar_month_end'] = pd.to_datetime(scen['calendar_month_end'], errors='coerce') + pd.offsets.MonthEnd(0)
+    scen = scen.dropna(subset=['calendar_month_end'])
+    if scen.empty:
+        return None
+    scen = scen.sort_values('calendar_month_end').drop_duplicates('calendar_month_end', keep='last')
+    value_by_month = scen.set_index('calendar_month_end')[value_column].astype(float)
+    idx = pd.Series(pd.to_datetime(month_ends, errors='coerce') + pd.offsets.MonthEnd(0))
+    mapped = idx.map(value_by_month).astype(float)
+    if len(mapped) != len(base):
+        n = min(len(mapped), len(base))
+        if n <= 0:
+            return None
+        out = base.iloc[:n].copy()
+        fill = mapped.iloc[:n]
+        out.loc[~fill.isna()] = fill.loc[~fill.isna()].to_numpy()
+        out.index = pd.RangeIndex(len(out))
+        return out
+    out = base.copy()
+    not_na = ~mapped.isna()
+    out.loc[not_na.to_numpy()] = mapped.loc[not_na].to_numpy()
+    out.index = pd.RangeIndex(len(out))
+    return out
+
+
+def _build_scenario_delta_series(
+    *,
+    month_ends: pd.Series,
+    scenario_monthly: pd.DataFrame | None,
+    scenario_id: str,
+) -> pd.Series | None:
+    sid = str(scenario_id or '').strip()
+    if sid == '__base__':
+        out = pd.Series(0.0, index=pd.RangeIndex(len(pd.Series(month_ends))), dtype=float)
+        return out
+    if not sid or scenario_monthly is None or scenario_monthly.empty:
+        return None
+    if 'scenario_id' not in scenario_monthly.columns or 'calendar_month_end' not in scenario_monthly.columns:
+        return None
+    if 'delta_vs_base' not in scenario_monthly.columns:
+        return None
+    scen = scenario_monthly[scenario_monthly['scenario_id'].astype(str) == sid].copy()
+    if scen.empty:
+        return None
+    scen['calendar_month_end'] = pd.to_datetime(scen['calendar_month_end'], errors='coerce') + pd.offsets.MonthEnd(0)
+    scen = scen.dropna(subset=['calendar_month_end'])
+    if scen.empty:
+        return None
+    scen = scen.sort_values('calendar_month_end').drop_duplicates('calendar_month_end', keep='last')
+    delta_by_month = scen.set_index('calendar_month_end')['delta_vs_base'].astype(float)
+    idx = pd.Series(pd.to_datetime(month_ends, errors='coerce') + pd.offsets.MonthEnd(0))
+    out = idx.map(delta_by_month).fillna(0.0).astype(float)
+    out.index = pd.RangeIndex(len(out))
+    return out
+
+
+def _reconciled_total_from_components(
+    *,
+    existing: pd.Series,
+    added: pd.Series,
+    matured: pd.Series,
+    refilled: pd.Series,
+    growth: pd.Series,
+) -> pd.Series:
+    """Return total that exactly reconciles to displayed decomposition components."""
+    out = (
+        pd.Series(existing, dtype=float).reset_index(drop=True)
+        + pd.Series(added, dtype=float).reset_index(drop=True)
+        - pd.Series(matured, dtype=float).reset_index(drop=True)
+        + pd.Series(refilled, dtype=float).reset_index(drop=True)
+        + pd.Series(growth, dtype=float).reset_index(drop=True)
+    )
+    out.index = pd.RangeIndex(len(out))
+    return out
 
 
 def _effective_contribution_chart(
@@ -703,11 +838,15 @@ def _build_aggregation_windows(month_ends: pd.Series, window_mode: str) -> list[
     positions = pd.Series(np.arange(len(month_ends)), index=month_ends.index)
     windows: list[tuple[str, pd.Series]] = []
 
+    if mode == 'full horizon':
+        windows.append(('All (Full Horizon)', positions >= 0))
+        return windows
+
     if mode == 'next 5 years':
-        all_mask = (positions >= 60) & (positions < 120)
+        all_mask = (positions >= 0) & (positions < 60)
         windows.append(('All (Y1-Y5)', all_mask))
         for y in range(1, 6):
-            start = 60 + (y - 1) * 12
+            start = (y - 1) * 12
             end = start + 12
             y_mask = (positions >= start) & (positions < end)
             if bool(y_mask.any()):
@@ -740,19 +879,57 @@ def _render_aggregation_table(
     effective_growth: pd.Series,
     effective_total: pd.Series,
     key_prefix: str,
+    scenario_a_effective_total: pd.Series | None = None,
+    scenario_b_effective_total: pd.Series | None = None,
+    scenario_a_effective_refilled: pd.Series | None = None,
+    scenario_b_effective_refilled: pd.Series | None = None,
+    scenario_a_effective_growth: pd.Series | None = None,
+    scenario_b_effective_growth: pd.Series | None = None,
+    scenario_a_effective_refilled_base: pd.Series | None = None,
+    scenario_b_effective_refilled_base: pd.Series | None = None,
+    scenario_a_effective_growth_base: pd.Series | None = None,
+    scenario_b_effective_growth_base: pd.Series | None = None,
+    scenario_a_delta_total: pd.Series | None = None,
+    scenario_b_delta_total: pd.Series | None = None,
+    scenario_a_label: str = '',
+    scenario_b_label: str = '',
+    scenario_a_id: str = '',
+    scenario_b_id: str = '',
+    include_full_horizon: bool = False,
+    expander_state_key: str | None = None,
 ) -> None:
+    def _keep_expander_open() -> None:
+        if expander_state_key:
+            st.session_state[expander_state_key] = True
+
     horizon_options = ['Next 5 Years', '5 Calendar Years']
+    if include_full_horizon:
+        horizon_options = ['Full Horizon'] + horizon_options
     horizon_key = f'{key_prefix}_aggregation_horizon'
-    horizon_default = 'Next 5 Years'
-    horizon_current = coerce_option(st.session_state.get(horizon_key, horizon_default), horizon_options, horizon_default)
-    st.session_state[horizon_key] = horizon_current
-    window_mode = st.radio(
-        label='Aggregation horizon',
-        options=horizon_options,
-        index=horizon_options.index(horizon_current),
-        horizontal=True,
-        key=horizon_key,
-    )
+    horizon_persist_key = f'{horizon_key}_persist'
+    horizon_default = 'Full Horizon' if include_full_horizon else 'Next 5 Years'
+    horizon_seed = st.session_state.get(horizon_key, st.session_state.get(horizon_persist_key, horizon_default))
+    horizon_current = coerce_option(horizon_seed, horizon_options, horizon_default)
+    if horizon_key in st.session_state:
+        if st.session_state.get(horizon_key) != horizon_current:
+            st.session_state[horizon_key] = horizon_current
+        window_mode = st.radio(
+            label='Aggregation horizon',
+            options=horizon_options,
+            horizontal=True,
+            key=horizon_key,
+            on_change=_keep_expander_open,
+        )
+    else:
+        window_mode = st.radio(
+            label='Aggregation horizon',
+            options=horizon_options,
+            index=horizon_options.index(horizon_current),
+            horizontal=True,
+            key=horizon_key,
+            on_change=_keep_expander_open,
+        )
+    st.session_state[horizon_persist_key] = window_mode
 
     windows = _build_aggregation_windows(month_ends, window_mode)
     if not windows:
@@ -760,37 +937,98 @@ def _render_aggregation_table(
         return
     split_options = [label for label, _ in windows]
     split_key = f'{key_prefix}_aggregation_split'
+    split_persist_key = f'{split_key}_persist'
     split_default = split_options[0]
-    split_current = coerce_option(st.session_state.get(split_key, split_default), split_options, split_default)
-    st.session_state[split_key] = split_current
-    split = st.radio(
-        label='Aggregation split',
-        options=split_options,
-        index=split_options.index(split_current),
-        horizontal=True,
-        key=split_key,
-    )
+    split_seed = st.session_state.get(split_key, st.session_state.get(split_persist_key, split_default))
+    split_current = coerce_option(split_seed, split_options, split_default)
+    if split_key in st.session_state:
+        if st.session_state.get(split_key) != split_current:
+            st.session_state[split_key] = split_current
+        split = st.radio(
+            label='Aggregation split',
+            options=split_options,
+            horizontal=True,
+            key=split_key,
+            on_change=_keep_expander_open,
+        )
+    else:
+        split = st.radio(
+            label='Aggregation split',
+            options=split_options,
+            index=split_options.index(split_current),
+            horizontal=True,
+            key=split_key,
+            on_change=_keep_expander_open,
+        )
+    st.session_state[split_persist_key] = split
     masks = {label: mask for label, mask in windows}
     mask = masks[split]
-    if not bool(mask.any()):
+    mask_series = pd.Series(mask, dtype=bool).reset_index(drop=True)
+    if not bool(mask_series.any()):
         st.info('No runoff points available for the selected aggregation horizon.')
         return
 
+    def _window_values(s: pd.Series) -> pd.Series:
+        series = pd.Series(s, dtype=float).reset_index(drop=True)
+        if series.empty or mask_series.empty:
+            return pd.Series(dtype=float)
+        n = min(len(series), len(mask_series))
+        if n <= 0:
+            return pd.Series(dtype=float)
+        mask_arr = mask_series.iloc[:n].to_numpy(dtype=bool)
+        return series.iloc[:n][mask_arr]
+
     def _sum(s: pd.Series) -> float:
-        return float(s.loc[mask].astype(float).sum())
+        vals = _window_values(s)
+        if vals.empty:
+            return 0.0
+        return float(vals.sum())
+
+    def _start(s: pd.Series) -> float:
+        vals = _window_values(s)
+        if vals.empty:
+            return 0.0
+        return float(vals.iloc[0])
+
+    def _end(s: pd.Series) -> float:
+        vals = _window_values(s)
+        if vals.empty:
+            return 0.0
+        return float(vals.iloc[-1])
+
+    def _delta(s: pd.Series) -> float:
+        return _end(s) - _start(s)
 
     rows = [
         {
-            'Metric': 'Notional',
-            'Existing': _sum(notional_existing),
-            'Added': _sum(notional_added),
-            'Refilled': _sum(notional_refilled),
-            'Growth': _sum(notional_growth),
-            'Matured': _sum(notional_matured_effect),
-            'Total': _sum(notional_total),
+            'Metric': 'Notional Start',
+            'Existing': _start(notional_existing),
+            'Added': _start(notional_added),
+            'Refilled': _start(notional_refilled),
+            'Growth': _start(notional_growth),
+            'Matured': _start(notional_matured_effect),
+            'Total': _start(notional_total),
         },
         {
-            'Metric': 'Effective Interest',
+            'Metric': 'Notional End',
+            'Existing': _end(notional_existing),
+            'Added': _end(notional_added),
+            'Refilled': _end(notional_refilled),
+            'Growth': _end(notional_growth),
+            'Matured': _end(notional_matured_effect),
+            'Total': _end(notional_total),
+        },
+        {
+            'Metric': 'Notional Change',
+            'Existing': _delta(notional_existing),
+            'Added': _delta(notional_added),
+            'Refilled': _delta(notional_refilled),
+            'Growth': _delta(notional_growth),
+            'Matured': _delta(notional_matured_effect),
+            'Total': _delta(notional_total),
+        },
+        {
+            'Metric': 'Effective Interest (Sum)',
             'Existing': _sum(effective_existing),
             'Added': _sum(effective_added),
             'Refilled': _sum(effective_refilled),
@@ -799,8 +1037,88 @@ def _render_aggregation_table(
             'Total': _sum(effective_total),
         },
     ]
+    effective_existing_sum = _sum(effective_existing)
+    effective_added_sum = _sum(effective_added)
+    effective_matured_sum = _sum(effective_matured_effect)
+    effective_refilled_sum = _sum(effective_refilled)
+    effective_growth_sum = _sum(effective_growth)
+    effective_total_sum = _sum(effective_total)
+    if scenario_a_effective_total is not None:
+        a_refilled = _sum(scenario_a_effective_refilled) if scenario_a_effective_refilled is not None else np.nan
+        a_growth = _sum(scenario_a_effective_growth) if scenario_a_effective_growth is not None else np.nan
+        a_refilled_base = (
+            _sum(scenario_a_effective_refilled_base)
+            if scenario_a_effective_refilled_base is not None
+            else effective_refilled_sum
+        )
+        a_growth_base = (
+            _sum(scenario_a_effective_growth_base)
+            if scenario_a_effective_growth_base is not None
+            else effective_growth_sum
+        )
+        a_total = _sum(scenario_a_effective_total)
+        a_row_label = f'{scenario_a_label or "Scenario A"} [{scenario_a_id}]' if scenario_a_id else (scenario_a_label or 'Scenario A')
+        rows.append(
+            {
+                'Metric': f'Effective Interest (Sum) - {a_row_label}',
+                'Existing': effective_existing_sum,
+                'Added': effective_added_sum,
+                'Refilled': a_refilled,
+                'Growth': a_growth,
+                'Matured': effective_matured_sum,
+                'Total': a_total,
+            }
+        )
+        rows.append(
+            {
+                'Metric': f'Effective Interest Delta vs Base - {a_row_label}',
+                'Existing': 0.0,
+                'Added': 0.0,
+                'Refilled': (a_refilled - a_refilled_base) if not pd.isna(a_refilled) else np.nan,
+                'Growth': (a_growth - a_growth_base) if not pd.isna(a_growth) else np.nan,
+                'Matured': 0.0,
+                'Total': _sum(scenario_a_delta_total) if scenario_a_delta_total is not None else (a_total - effective_total_sum),
+            }
+        )
+    if scenario_b_effective_total is not None:
+        b_refilled = _sum(scenario_b_effective_refilled) if scenario_b_effective_refilled is not None else np.nan
+        b_growth = _sum(scenario_b_effective_growth) if scenario_b_effective_growth is not None else np.nan
+        b_refilled_base = (
+            _sum(scenario_b_effective_refilled_base)
+            if scenario_b_effective_refilled_base is not None
+            else effective_refilled_sum
+        )
+        b_growth_base = (
+            _sum(scenario_b_effective_growth_base)
+            if scenario_b_effective_growth_base is not None
+            else effective_growth_sum
+        )
+        b_total = _sum(scenario_b_effective_total)
+        b_row_label = f'{scenario_b_label or "Scenario B"} [{scenario_b_id}]' if scenario_b_id else (scenario_b_label or 'Scenario B')
+        rows.append(
+            {
+                'Metric': f'Effective Interest (Sum) - {b_row_label}',
+                'Existing': effective_existing_sum,
+                'Added': effective_added_sum,
+                'Refilled': b_refilled,
+                'Growth': b_growth,
+                'Matured': effective_matured_sum,
+                'Total': b_total,
+            }
+        )
+        rows.append(
+            {
+                'Metric': f'Effective Interest Delta vs Base - {b_row_label}',
+                'Existing': 0.0,
+                'Added': 0.0,
+                'Refilled': (b_refilled - b_refilled_base) if not pd.isna(b_refilled) else np.nan,
+                'Growth': (b_growth - b_growth_base) if not pd.isna(b_growth) else np.nan,
+                'Matured': 0.0,
+                'Total': _sum(scenario_b_delta_total) if scenario_b_delta_total is not None else (b_total - effective_total_sum),
+            }
+        )
     table = pd.DataFrame(rows).set_index('Metric')
-    st.dataframe(style_numeric_table(table), use_container_width=True)
+    st.dataframe(style_numeric_table(table), width='stretch')
 
 
 def _bucketed_month_effective_contribution(
@@ -892,6 +1210,8 @@ def render_runoff_delta_charts(
     refill_logic_df: pd.DataFrame | None = None,
     curve_df: pd.DataFrame | None = None,
     ui_state: dict[str, Any] | None = None,
+    scenario_monthly: pd.DataFrame | None = None,
+    scenario_label_map: dict[str, str] | None = None,
 ) -> str:
     if compare_df.empty:
         st.info('No runoff data to display.')
@@ -923,6 +1243,10 @@ def render_runoff_delta_charts(
     monthly_growth_amount = float(ui_state.get('growth_monthly_value', 0.0))
     chart_view = str(ui_state.get('runoff_chart_view', 'Notional Decomposition'))
     flip_y_axis = bool(ui_state.get('flip_y_axis', False))
+    scenario_compare_enabled = bool(ui_state.get('runoff_scenario_compare_enabled', False))
+    scenario_a_id = str(ui_state.get('runoff_scenario_a_id', '') or '')
+    scenario_b_id = str(ui_state.get('runoff_scenario_b_id', '') or '')
+    scenario_label_map = scenario_label_map or {}
 
     if basis == 'T1':
         notional_existing = _first_available(['signed_notional_d1', 'abs_notional_d1'])
@@ -1036,6 +1360,127 @@ def render_runoff_delta_charts(
     month_ends = active_df['remaining_maturity_months'].astype(int).apply(
         lambda m: (basis_date + pd.offsets.MonthEnd(int(m))).normalize()
     )
+    refill_effective_total_base = nc_total + refill_effective + growth_effective
+    scenario_compare_available = scenario_compare_enabled and basis == 'T2'
+    scenario_a_total = None
+    scenario_b_total = None
+    scenario_a_refill_effective = None
+    scenario_b_refill_effective = None
+    scenario_a_growth_effective = None
+    scenario_b_growth_effective = None
+    scenario_a_refill_effective_base = None
+    scenario_b_refill_effective_base = None
+    scenario_a_growth_effective_base = None
+    scenario_b_growth_effective_base = None
+    scenario_a_delta_total = None
+    scenario_b_delta_total = None
+    scenario_a_total_reconciled = None
+    scenario_b_total_reconciled = None
+    scenario_a_label = scenario_label_map.get(scenario_a_id, scenario_a_id)
+    scenario_b_label = scenario_label_map.get(scenario_b_id, scenario_b_id)
+    if scenario_compare_available:
+        scenario_a_total = _build_scenario_total_series(
+            base_total=refill_effective_total_base,
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+        )
+        scenario_b_total = _build_scenario_total_series(
+            base_total=refill_effective_total_base,
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+        )
+        scenario_a_refill_effective = _build_scenario_component_series(
+            base_component=refill_effective,
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+            value_column='refill_interest_shocked',
+        )
+        scenario_b_refill_effective = _build_scenario_component_series(
+            base_component=refill_effective,
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+            value_column='refill_interest_shocked',
+        )
+        scenario_a_growth_effective = _build_scenario_component_series(
+            base_component=growth_effective,
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+            value_column='growth_interest_shocked',
+        )
+        scenario_b_growth_effective = _build_scenario_component_series(
+            base_component=growth_effective,
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+            value_column='growth_interest_shocked',
+        )
+        scenario_a_refill_effective_base = _build_scenario_component_series(
+            base_component=refill_effective,
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+            value_column='refill_interest_base',
+        )
+        scenario_b_refill_effective_base = _build_scenario_component_series(
+            base_component=refill_effective,
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+            value_column='refill_interest_base',
+        )
+        scenario_a_growth_effective_base = _build_scenario_component_series(
+            base_component=growth_effective,
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+            value_column='growth_interest_base',
+        )
+        scenario_b_growth_effective_base = _build_scenario_component_series(
+            base_component=growth_effective,
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+            value_column='growth_interest_base',
+        )
+        scenario_a_delta_total = _build_scenario_delta_series(
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+        )
+        scenario_b_delta_total = _build_scenario_delta_series(
+            month_ends=month_ends,
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+        )
+        if scenario_a_refill_effective is not None and scenario_a_growth_effective is not None:
+            scenario_a_total_reconciled = _reconciled_total_from_components(
+                existing=nc_existing,
+                added=nc_added,
+                matured=nc_matured,
+                refilled=scenario_a_refill_effective,
+                growth=scenario_a_growth_effective,
+            )
+        if scenario_b_refill_effective is not None and scenario_b_growth_effective is not None:
+            scenario_b_total_reconciled = _reconciled_total_from_components(
+                existing=nc_existing,
+                added=nc_added,
+                matured=nc_matured,
+                refilled=scenario_b_refill_effective,
+                growth=scenario_b_growth_effective,
+            )
+        if scenario_a_id and scenario_a_id == scenario_b_id:
+            scenario_b_total = scenario_a_total
+            scenario_b_refill_effective = scenario_a_refill_effective
+            scenario_b_growth_effective = scenario_a_growth_effective
+            scenario_b_refill_effective_base = scenario_a_refill_effective_base
+            scenario_b_growth_effective_base = scenario_a_growth_effective_base
+            scenario_b_delta_total = scenario_a_delta_total
+            scenario_b_total_reconciled = scenario_a_total_reconciled
 
     if selected_view == 'Notional Decomposition':
         fig = _component_chart(
@@ -1051,7 +1496,7 @@ def render_runoff_delta_charts(
             cumulative_label='Cumulative Signed Notional (Running)',
             flip_y_axis=flip_y_axis,
         )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_notional')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_notional')
     elif selected_view == 'Effective Interest Decomposition':
         fig = _component_chart(
             x=active_df['remaining_maturity_months'],
@@ -1066,7 +1511,7 @@ def render_runoff_delta_charts(
             cumulative_label='Cumulative Effective Interest',
             flip_y_axis=flip_y_axis,
         )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_nc')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_nc')
     elif selected_view == 'Effective Interest Contribution':
         if deals_df is not None and basis_t1 is not None and basis_t2 is not None:
             basis_date = pd.Timestamp(basis_t1) if basis == 'T1' else pd.Timestamp(basis_t2)
@@ -1104,7 +1549,7 @@ def render_runoff_delta_charts(
                 cumulative_label='Cumulative Effective Interest (Running)',
                 flip_y_axis=flip_y_axis,
             )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_effective_contribution')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_effective_contribution')
     elif selected_view == 'Deal Count Decomposition':
         fig = _component_chart(
             x=active_df['remaining_maturity_months'],
@@ -1119,25 +1564,85 @@ def render_runoff_delta_charts(
             cumulative_label='Cumulative Deal Count',
             flip_y_axis=flip_y_axis,
         )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_deals')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_deals')
     elif selected_view == 'Effective Interest Decomposition (Refill/Growth)' and include_refill_views:
-        refill_effective_total = nc_total + refill_effective + growth_effective
-        fig = _component_chart(
-            x=active_df['remaining_maturity_months'],
-            y_existing=nc_existing,
-            y_added=nc_added,
-            y_refilled=refill_effective,
-            y_growth=growth_effective,
-            y_matured=nc_matured,
-            y_total=refill_effective_total,
-            y_cumulative=refill_effective_total.cumsum(),
-            title=f'Runoff Buckets: Effective Interest Decomposition ({refill_title_suffix}, {basis})',
-            x_label='Remaining Maturity (Months)',
-            y_label='Effective Interest',
-            cumulative_label='Cumulative Effective Interest',
-            flip_y_axis=flip_y_axis,
-        )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_effective')
+        if scenario_compare_available:
+            y_refilled_a = scenario_a_refill_effective if scenario_a_refill_effective is not None else refill_effective
+            y_growth_a = scenario_a_growth_effective if scenario_a_growth_effective is not None else growth_effective
+            y_total_a = (
+                scenario_a_total_reconciled
+                if scenario_a_total_reconciled is not None
+                else scenario_a_total
+                if scenario_a_total is not None
+                else refill_effective_total_base
+            )
+            fig_a = _component_chart(
+                x=active_df['remaining_maturity_months'],
+                y_existing=nc_existing,
+                y_added=nc_added,
+                y_refilled=y_refilled_a,
+                y_growth=y_growth_a,
+                y_matured=nc_matured,
+                y_total=y_total_a,
+                y_cumulative=y_total_a.cumsum(),
+                title=(
+                    f'Runoff Buckets: Effective Interest Decomposition '
+                    f'({refill_title_suffix}, {basis}) - Scenario A: {scenario_a_label}'
+                ),
+                x_label='Remaining Maturity (Months)',
+                y_label='Effective Interest',
+                cumulative_label='Cumulative Effective Interest',
+                extra_primary_series=[s for s in [y_total_a] if s is not None],
+                flip_y_axis=flip_y_axis,
+            )
+            st.plotly_chart(fig_a, width='stretch', key=f'{key_prefix}_refill_effective_scenario_a')
+
+            y_refilled_b = scenario_b_refill_effective if scenario_b_refill_effective is not None else refill_effective
+            y_growth_b = scenario_b_growth_effective if scenario_b_growth_effective is not None else growth_effective
+            y_total_b = (
+                scenario_b_total_reconciled
+                if scenario_b_total_reconciled is not None
+                else scenario_b_total
+                if scenario_b_total is not None
+                else refill_effective_total_base
+            )
+            fig_b = _component_chart(
+                x=active_df['remaining_maturity_months'],
+                y_existing=nc_existing,
+                y_added=nc_added,
+                y_refilled=y_refilled_b,
+                y_growth=y_growth_b,
+                y_matured=nc_matured,
+                y_total=y_total_b,
+                y_cumulative=y_total_b.cumsum(),
+                title=(
+                    f'Runoff Buckets: Effective Interest Decomposition '
+                    f'({refill_title_suffix}, {basis}) - Scenario B: {scenario_b_label}'
+                ),
+                x_label='Remaining Maturity (Months)',
+                y_label='Effective Interest',
+                cumulative_label='Cumulative Effective Interest',
+                extra_primary_series=[s for s in [y_total_b] if s is not None],
+                flip_y_axis=flip_y_axis,
+            )
+            st.plotly_chart(fig_b, width='stretch', key=f'{key_prefix}_refill_effective_scenario_b')
+        else:
+            fig = _component_chart(
+                x=active_df['remaining_maturity_months'],
+                y_existing=nc_existing,
+                y_added=nc_added,
+                y_refilled=refill_effective,
+                y_growth=growth_effective,
+                y_matured=nc_matured,
+                y_total=refill_effective_total_base,
+                y_cumulative=refill_effective_total_base.cumsum(),
+                title=f'Runoff Buckets: Effective Interest Decomposition ({refill_title_suffix}, {basis})',
+                x_label='Remaining Maturity (Months)',
+                y_label='Effective Interest',
+                cumulative_label='Cumulative Effective Interest',
+                flip_y_axis=flip_y_axis,
+            )
+            st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_refill_effective')
     elif selected_view == 'Cumulative Notional (Refill/Growth)' and include_refill_views:
         refill_notional_total = cum_notional_total_chart + refill_required + growth_outstanding
         fig = _component_chart(
@@ -1155,7 +1660,7 @@ def render_runoff_delta_charts(
             cumulative_label='Cumulative Notional',
             flip_y_axis=flip_y_axis,
         )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_cumulative')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_refill_cumulative')
     elif selected_view == 'Refill Allocation Heatmap' and include_refill_views:
         fig = _refill_allocation_heatmap(
             month_ends=month_ends,
@@ -1170,7 +1675,7 @@ def render_runoff_delta_charts(
         if fig is None:
             st.info('Refill allocation heatmap unavailable: could not derive shifted one-month delta weights.')
         else:
-            st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_allocation_heatmap')
+            st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_refill_allocation_heatmap')
             refill_line = _refill_volume_interest_chart(
                 month_ends=month_ends,
                 refill_required=refill_required,
@@ -1180,7 +1685,7 @@ def render_runoff_delta_charts(
                 x_label='Calendar Month End',
                 flip_y_axis=flip_y_axis,
             )
-            st.plotly_chart(refill_line, use_container_width=True, key=f'{key_prefix}_refill_volume_interest')
+            st.plotly_chart(refill_line, width='stretch', key=f'{key_prefix}_refill_volume_interest')
     else:
         fig = _component_chart(
             x=active_df['remaining_maturity_months'],
@@ -1195,11 +1700,12 @@ def render_runoff_delta_charts(
             cumulative_label='Cumulative Notional',
             flip_y_axis=flip_y_axis,
         )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_cumulative')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_cumulative')
 
     notional_total_for_table = cum_notional_total_chart + refill_required + growth_outstanding
-    effective_total_for_table = nc_total + refill_effective + growth_effective
-    with st.expander('Runoff 5Y Aggregation', expanded=False):
+    effective_total_for_table = refill_effective_total_base
+    expander_key = f'{key_prefix}_aggregation_expanded'
+    with st.expander('Runoff Aggregation', expanded=bool(st.session_state.get(expander_key, False))):
         _render_aggregation_table(
             month_ends=month_ends,
             notional_existing=cum_notional_existing_chart,
@@ -1215,6 +1721,24 @@ def render_runoff_delta_charts(
             effective_growth=growth_effective,
             effective_total=effective_total_for_table,
             key_prefix=f'{key_prefix}_summary',
+            scenario_a_effective_total=(scenario_a_total_reconciled if scenario_a_total_reconciled is not None else scenario_a_total),
+            scenario_b_effective_total=(scenario_b_total_reconciled if scenario_b_total_reconciled is not None else scenario_b_total),
+            scenario_a_effective_refilled=scenario_a_refill_effective,
+            scenario_b_effective_refilled=scenario_b_refill_effective,
+            scenario_a_effective_growth=scenario_a_growth_effective,
+            scenario_b_effective_growth=scenario_b_growth_effective,
+            scenario_a_effective_refilled_base=scenario_a_refill_effective_base,
+            scenario_b_effective_refilled_base=scenario_b_refill_effective_base,
+            scenario_a_effective_growth_base=scenario_a_growth_effective_base,
+            scenario_b_effective_growth_base=scenario_b_growth_effective_base,
+            scenario_a_delta_total=scenario_a_delta_total,
+            scenario_b_delta_total=scenario_b_delta_total,
+            scenario_a_label=scenario_a_label,
+            scenario_b_label=scenario_b_label,
+            scenario_a_id=scenario_a_id,
+            scenario_b_id=scenario_b_id,
+            include_full_horizon=scenario_compare_available,
+            expander_state_key=expander_key,
         )
     return selected_view
 
@@ -1231,6 +1755,8 @@ def render_calendar_runoff_charts(
     refill_logic_df: pd.DataFrame | None = None,
     curve_df: pd.DataFrame | None = None,
     ui_state: dict[str, Any] | None = None,
+    scenario_monthly: pd.DataFrame | None = None,
+    scenario_label_map: dict[str, str] | None = None,
 ) -> str:
     """Render runoff charts using actual calendar month-end x-axis."""
     if calendar_df.empty:
@@ -1257,6 +1783,10 @@ def render_calendar_runoff_charts(
     monthly_growth_amount = float(ui_state.get('growth_monthly_value', 0.0))
     chart_view = str(ui_state.get('runoff_chart_view', 'Notional Decomposition'))
     flip_y_axis = bool(ui_state.get('flip_y_axis', False))
+    scenario_compare_enabled = bool(ui_state.get('runoff_scenario_compare_enabled', False))
+    scenario_a_id = str(ui_state.get('runoff_scenario_a_id', '') or '')
+    scenario_b_id = str(ui_state.get('runoff_scenario_b_id', '') or '')
+    scenario_label_map = scenario_label_map or {}
     is_t1_basis = basis == 'T1'
 
     if is_t1_basis:
@@ -1299,6 +1829,7 @@ def render_calendar_runoff_charts(
         nc_existing = (
             _first_available(['effective_interest_t2', 'notional_coupon_t2'])
             - _first_available(['added_effective_interest', 'added_notional_coupon'])
+            + _first_available(['matured_effective_interest', 'matured_notional_coupon'])
         )
         nc_added = _first_available(['added_effective_interest', 'added_notional_coupon'])
         nc_matured = _first_available(['matured_effective_interest', 'matured_notional_coupon'])
@@ -1358,6 +1889,127 @@ def render_calendar_runoff_charts(
         _available_runoff_chart_options(include_refill_views),
         'Notional Decomposition',
     )
+    refill_effective_total_base = nc_total + refill_effective + growth_effective
+    scenario_compare_available = scenario_compare_enabled and not is_t1_basis
+    scenario_a_total = None
+    scenario_b_total = None
+    scenario_a_refill_effective = None
+    scenario_b_refill_effective = None
+    scenario_a_growth_effective = None
+    scenario_b_growth_effective = None
+    scenario_a_refill_effective_base = None
+    scenario_b_refill_effective_base = None
+    scenario_a_growth_effective_base = None
+    scenario_b_growth_effective_base = None
+    scenario_a_delta_total = None
+    scenario_b_delta_total = None
+    scenario_a_total_reconciled = None
+    scenario_b_total_reconciled = None
+    scenario_a_label = scenario_label_map.get(scenario_a_id, scenario_a_id)
+    scenario_b_label = scenario_label_map.get(scenario_b_id, scenario_b_id)
+    if scenario_compare_available:
+        scenario_a_total = _build_scenario_total_series(
+            base_total=refill_effective_total_base,
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+        )
+        scenario_b_total = _build_scenario_total_series(
+            base_total=refill_effective_total_base,
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+        )
+        scenario_a_refill_effective = _build_scenario_component_series(
+            base_component=refill_effective,
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+            value_column='refill_interest_shocked',
+        )
+        scenario_b_refill_effective = _build_scenario_component_series(
+            base_component=refill_effective,
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+            value_column='refill_interest_shocked',
+        )
+        scenario_a_growth_effective = _build_scenario_component_series(
+            base_component=growth_effective,
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+            value_column='growth_interest_shocked',
+        )
+        scenario_b_growth_effective = _build_scenario_component_series(
+            base_component=growth_effective,
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+            value_column='growth_interest_shocked',
+        )
+        scenario_a_refill_effective_base = _build_scenario_component_series(
+            base_component=refill_effective,
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+            value_column='refill_interest_base',
+        )
+        scenario_b_refill_effective_base = _build_scenario_component_series(
+            base_component=refill_effective,
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+            value_column='refill_interest_base',
+        )
+        scenario_a_growth_effective_base = _build_scenario_component_series(
+            base_component=growth_effective,
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+            value_column='growth_interest_base',
+        )
+        scenario_b_growth_effective_base = _build_scenario_component_series(
+            base_component=growth_effective,
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+            value_column='growth_interest_base',
+        )
+        scenario_a_delta_total = _build_scenario_delta_series(
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_a_id,
+        )
+        scenario_b_delta_total = _build_scenario_delta_series(
+            month_ends=df['calendar_month_end'],
+            scenario_monthly=scenario_monthly,
+            scenario_id=scenario_b_id,
+        )
+        if scenario_a_refill_effective is not None and scenario_a_growth_effective is not None:
+            scenario_a_total_reconciled = _reconciled_total_from_components(
+                existing=nc_existing,
+                added=nc_added,
+                matured=nc_matured,
+                refilled=scenario_a_refill_effective,
+                growth=scenario_a_growth_effective,
+            )
+        if scenario_b_refill_effective is not None and scenario_b_growth_effective is not None:
+            scenario_b_total_reconciled = _reconciled_total_from_components(
+                existing=nc_existing,
+                added=nc_added,
+                matured=nc_matured,
+                refilled=scenario_b_refill_effective,
+                growth=scenario_b_growth_effective,
+            )
+        if scenario_a_id and scenario_a_id == scenario_b_id:
+            scenario_b_total = scenario_a_total
+            scenario_b_refill_effective = scenario_a_refill_effective
+            scenario_b_growth_effective = scenario_a_growth_effective
+            scenario_b_refill_effective_base = scenario_a_refill_effective_base
+            scenario_b_growth_effective_base = scenario_a_growth_effective_base
+            scenario_b_delta_total = scenario_a_delta_total
+            scenario_b_total_reconciled = scenario_a_total_reconciled
 
     if selected_view == 'Notional Decomposition':
         fig = _component_chart(
@@ -1373,7 +2025,7 @@ def render_calendar_runoff_charts(
             cumulative_label='Cumulative Signed Notional (Running)',
             flip_y_axis=flip_y_axis,
         )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_notional')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_notional')
     elif selected_view == 'Effective Interest Decomposition':
         fig = _component_chart(
             x=x_vals,
@@ -1388,7 +2040,7 @@ def render_calendar_runoff_charts(
             cumulative_label='Cumulative Effective Interest',
             flip_y_axis=flip_y_axis,
         )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_nc')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_nc')
     elif selected_view == 'Effective Interest Contribution':
         # In calendar display mode, show bucketed contribution for the first
         # calendar step (the selected basis month) to reconcile with daily totals.
@@ -1471,7 +2123,7 @@ def render_calendar_runoff_charts(
                 cumulative_label='Cumulative Effective Interest (Running)',
                 flip_y_axis=flip_y_axis,
             )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_effective_contribution')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_effective_contribution')
     elif selected_view == 'Deal Count Decomposition':
         fig = _component_chart(
             x=x_vals,
@@ -1486,25 +2138,85 @@ def render_calendar_runoff_charts(
             cumulative_label='Cumulative Deal Count',
             flip_y_axis=flip_y_axis,
         )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_deals')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_deals')
     elif selected_view == 'Effective Interest Decomposition (Refill/Growth)' and include_refill_views:
-        refill_effective_total = nc_total + refill_effective + growth_effective
-        fig = _component_chart(
-            x=x_vals,
-            y_existing=nc_existing,
-            y_added=nc_added,
-            y_refilled=refill_effective,
-            y_growth=growth_effective,
-            y_matured=nc_matured,
-            y_total=refill_effective_total,
-            y_cumulative=refill_effective_total.cumsum(),
-            title=f'Runoff by Calendar Month: Effective Interest Decomposition ({refill_title_suffix}, {basis})',
-            x_label='Calendar Month End',
-            y_label='Effective Interest',
-            cumulative_label='Cumulative Effective Interest',
-            flip_y_axis=flip_y_axis,
-        )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_effective')
+        if scenario_compare_available:
+            y_refilled_a = scenario_a_refill_effective if scenario_a_refill_effective is not None else refill_effective
+            y_growth_a = scenario_a_growth_effective if scenario_a_growth_effective is not None else growth_effective
+            y_total_a = (
+                scenario_a_total_reconciled
+                if scenario_a_total_reconciled is not None
+                else scenario_a_total
+                if scenario_a_total is not None
+                else refill_effective_total_base
+            )
+            fig_a = _component_chart(
+                x=x_vals,
+                y_existing=nc_existing,
+                y_added=nc_added,
+                y_refilled=y_refilled_a,
+                y_growth=y_growth_a,
+                y_matured=nc_matured,
+                y_total=y_total_a,
+                y_cumulative=y_total_a.cumsum(),
+                title=(
+                    f'Runoff by Calendar Month: Effective Interest Decomposition '
+                    f'({refill_title_suffix}, {basis}) - Scenario A: {scenario_a_label}'
+                ),
+                x_label='Calendar Month End',
+                y_label='Effective Interest',
+                cumulative_label='Cumulative Effective Interest',
+                extra_primary_series=[s for s in [y_total_a] if s is not None],
+                flip_y_axis=flip_y_axis,
+            )
+            st.plotly_chart(fig_a, width='stretch', key=f'{key_prefix}_refill_effective_scenario_a')
+
+            y_refilled_b = scenario_b_refill_effective if scenario_b_refill_effective is not None else refill_effective
+            y_growth_b = scenario_b_growth_effective if scenario_b_growth_effective is not None else growth_effective
+            y_total_b = (
+                scenario_b_total_reconciled
+                if scenario_b_total_reconciled is not None
+                else scenario_b_total
+                if scenario_b_total is not None
+                else refill_effective_total_base
+            )
+            fig_b = _component_chart(
+                x=x_vals,
+                y_existing=nc_existing,
+                y_added=nc_added,
+                y_refilled=y_refilled_b,
+                y_growth=y_growth_b,
+                y_matured=nc_matured,
+                y_total=y_total_b,
+                y_cumulative=y_total_b.cumsum(),
+                title=(
+                    f'Runoff by Calendar Month: Effective Interest Decomposition '
+                    f'({refill_title_suffix}, {basis}) - Scenario B: {scenario_b_label}'
+                ),
+                x_label='Calendar Month End',
+                y_label='Effective Interest',
+                cumulative_label='Cumulative Effective Interest',
+                extra_primary_series=[s for s in [y_total_b] if s is not None],
+                flip_y_axis=flip_y_axis,
+            )
+            st.plotly_chart(fig_b, width='stretch', key=f'{key_prefix}_refill_effective_scenario_b')
+        else:
+            fig = _component_chart(
+                x=x_vals,
+                y_existing=nc_existing,
+                y_added=nc_added,
+                y_refilled=refill_effective,
+                y_growth=growth_effective,
+                y_matured=nc_matured,
+                y_total=refill_effective_total_base,
+                y_cumulative=refill_effective_total_base.cumsum(),
+                title=f'Runoff by Calendar Month: Effective Interest Decomposition ({refill_title_suffix}, {basis})',
+                x_label='Calendar Month End',
+                y_label='Effective Interest',
+                cumulative_label='Cumulative Effective Interest',
+                flip_y_axis=flip_y_axis,
+            )
+            st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_refill_effective')
     elif selected_view == 'Cumulative Notional (Refill/Growth)' and include_refill_views:
         refill_notional_total = cum_notional_total_chart + refill_required + growth_outstanding
         fig = _component_chart(
@@ -1522,7 +2234,7 @@ def render_calendar_runoff_charts(
             cumulative_label='Cumulative Notional',
             flip_y_axis=flip_y_axis,
         )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_cumulative')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_refill_cumulative')
     elif selected_view == 'Refill Allocation Heatmap' and include_refill_views:
         fig = _refill_allocation_heatmap(
             month_ends=df['calendar_month_end'],
@@ -1537,7 +2249,7 @@ def render_calendar_runoff_charts(
         if fig is None:
             st.info('Refill allocation heatmap unavailable: could not derive shifted one-month delta weights.')
         else:
-            st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_refill_allocation_heatmap')
+            st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_refill_allocation_heatmap')
             refill_line = _refill_volume_interest_chart(
                 month_ends=df['calendar_month_end'],
                 refill_required=refill_required,
@@ -1547,7 +2259,7 @@ def render_calendar_runoff_charts(
                 x_label='Calendar Month End',
                 flip_y_axis=flip_y_axis,
             )
-            st.plotly_chart(refill_line, use_container_width=True, key=f'{key_prefix}_refill_volume_interest')
+            st.plotly_chart(refill_line, width='stretch', key=f'{key_prefix}_refill_volume_interest')
     else:
         fig = _component_chart(
             x=x_vals,
@@ -1562,11 +2274,12 @@ def render_calendar_runoff_charts(
             cumulative_label='Cumulative Notional',
             flip_y_axis=flip_y_axis,
         )
-        st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_cumulative')
+        st.plotly_chart(fig, width='stretch', key=f'{key_prefix}_cumulative')
 
     notional_total_for_table = cum_notional_total_chart + refill_required + growth_outstanding
-    effective_total_for_table = nc_total + refill_effective + growth_effective
-    with st.expander('Runoff 5Y Aggregation', expanded=False):
+    effective_total_for_table = refill_effective_total_base
+    expander_key = f'{key_prefix}_aggregation_expanded'
+    with st.expander('Runoff Aggregation', expanded=bool(st.session_state.get(expander_key, False))):
         _render_aggregation_table(
             month_ends=df['calendar_month_end'],
             notional_existing=cum_notional_existing_chart,
@@ -1582,5 +2295,24 @@ def render_calendar_runoff_charts(
             effective_growth=growth_effective,
             effective_total=effective_total_for_table,
             key_prefix=f'{key_prefix}_summary',
+            scenario_a_effective_total=(scenario_a_total_reconciled if scenario_a_total_reconciled is not None else scenario_a_total),
+            scenario_b_effective_total=(scenario_b_total_reconciled if scenario_b_total_reconciled is not None else scenario_b_total),
+            scenario_a_effective_refilled=scenario_a_refill_effective,
+            scenario_b_effective_refilled=scenario_b_refill_effective,
+            scenario_a_effective_growth=scenario_a_growth_effective,
+            scenario_b_effective_growth=scenario_b_growth_effective,
+            scenario_a_effective_refilled_base=scenario_a_refill_effective_base,
+            scenario_b_effective_refilled_base=scenario_b_refill_effective_base,
+            scenario_a_effective_growth_base=scenario_a_growth_effective_base,
+            scenario_b_effective_growth_base=scenario_b_growth_effective_base,
+            scenario_a_delta_total=scenario_a_delta_total,
+            scenario_b_delta_total=scenario_b_delta_total,
+            scenario_a_label=scenario_a_label,
+            scenario_b_label=scenario_b_label,
+            scenario_a_id=scenario_a_id,
+            scenario_b_id=scenario_b_id,
+            include_full_horizon=scenario_compare_available,
+            expander_state_key=expander_key,
         )
     return selected_view
+

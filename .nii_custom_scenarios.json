@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "custom_scenarios": [
+    {
+      "scenario_id": "custom_test_manual",
+      "scenario_label": "Test_Manual",
+      "shock_type": "manual",
+      "materialization": "ramp",
+      "shock_bps": null,
+      "pivot_tenor_months": null,
+      "manual_nodes": [
+        {
+          "tenor_months": 1.0,
+          "shock_bps": -10.0
+        },
+        {
+          "tenor_months": 3.0,
+          "shock_bps": 20.0
+        },
+        {
+          "tenor_months": 6.0,
+          "shock_bps": 20.0
+        },
+        {
+          "tenor_months": 12.0,
+          "shock_bps": 20.0
+        },
+        {
+          "tenor_months": 24.0,
+          "shock_bps": 30.0
+        },
+        {
+          "tenor_months": 60.0,
+          "shock_bps": 60.0
+        },
+        {
+          "tenor_months": 120.0,
+          "shock_bps": 70.0
+        },
+        {
+          "tenor_months": 240.0,
+          "shock_bps": 100.0
+        }
+      ],
+      "created_at": "2026-03-01T14:51:20.566404+00:00"
+    }
+  ],
+  "active_scenario_ids": [
+    "inst_up_50",
+    "inst_up_100",
+    "inst_up_200",
+    "inst_dn_50",
+    "inst_dn_100",
+    "inst_dn_200",
+    "ramp_up_50",
+    "ramp_up_100",
+    "ramp_up_200",
+    "ramp_dn_50",
+    "ramp_dn_100",
+    "ramp_dn_200",
+    "inst_twist_up_5",
+    "inst_twist_up_10",
+    "inst_twist_dn_5",
+    "inst_twist_dn_10",
+    "ramp_twist_up_5",
+    "ramp_twist_up_10",
+    "ramp_twist_dn_5",
+    "ramp_twist_dn_10",
+    "custom_test_manual"
+  ]
+}

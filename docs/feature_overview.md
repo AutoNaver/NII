@@ -25,7 +25,9 @@ This is the canonical feature-status document for the NII dashboard.
 | Calculations | Cumulative growth outstanding profile | Implemented | Growth accumulates over time and rolls off by tenor survival |
 | Calculations | Rate-shock scenario engine (Overview, 5Y) | Implemented | Parallel (`+/-50/100/200 bps`) + twist around `6M` (`+/-5/10 bps`), instant/linear-12M shocks (ramp plateaus after month 12), contractual+refill/growth basis |
 | Dashboard | Monthly comparison mode (`T1` vs `T2`) | Implemented | Delta cards + compact metrics table |
-| Dashboard | Overview rate-scenario visuals | Implemented | Scenario matrix, selected-scenario monthly impact, anchor curve panel (instant: base vs shocked; ramp: base + shocked at 6M/12M), tenor movement chart for `1M/6M/1Y/5Y/10Y` over `0-24M` |
+| Dashboard | Overview rate-scenario visuals | Implemented | Scenario matrix (`Delta`/`Absolute`), selected-scenario monthly impact (`Delta`/`Absolute`, includes `BaseCase` in absolute view), anchor curve panel (instant: base vs shocked; ramp: base + shocked at 6M/12M), tenor movement chart for `1M/6M/1Y/5Y/10Y` over `0-24M` |
+| Dashboard | Overview executive Excel export pack | Implemented | Overview-triggered generate/download flow for `.xlsx` export with metadata, KPI metrics, scenario delta/absolute matrices, and first-year refill/growth distribution sheets |
+| Dashboard | Custom rate scenario builder with persistence | Implemented | Create/delete custom scenarios, persist active set in workspace `.nii_custom_scenarios.json`, and recompute on change |
 | Dashboard | Daily decomposition charts (interest/notional) | Implemented | View toggle for `T1`/`T2` and chart type |
 | Dashboard | Runoff display mode toggle | Implemented | `Aligned Buckets` and `Calendar Months` |
 | Dashboard | Product filter dropdown | Implemented | Sidebar product selector applies to all sections; single-product view by default |
@@ -35,7 +37,7 @@ This is the canonical feature-status document for the NII dashboard.
 | Dashboard | Deal-level difference tables | Implemented | Consolidated + category tables |
 | Dashboard | Number formatting (thousand separators) | Implemented | Applied across major tables and chart axes |
 | Dashboard | Clarity-first UI refresh (sidebar controls + stateful section workflow + compact runoff workflow) | Implemented | Global controls consolidated; section selection persists across reruns; chart/table pairing improved; aggregation collapsed by default |
-| Testing | Unit tests for accrual, loader, runoff, refill/growth, and rate scenarios | Implemented | Pytest suite in `tests/` including scenario-path and visualization helper coverage |
+| Testing | Unit tests for accrual, loader, runoff, refill/growth, rate scenarios, and scenario store | Implemented | Pytest suite in `tests/` including scenario-path, persistence, and visualization helper coverage |
 
 ## Planned Features
 
@@ -55,7 +57,7 @@ This is the canonical feature-status document for the NII dashboard.
 | Analytics | Forward-looking NII projections | Backlog | Scenario-ready projection engine |
 | Analytics | Multi-curve / advanced scenario analysis | Backlog | Beyond current parallel/twist shocks and materialization profiles |
 | UX | Deal-level drill-down pages | Backlog | Per-deal lifecycle and contribution views |
-| Reporting | Export to Excel/PDF | Backlog | Downloadable reporting artifacts |
+| Reporting | Export to PDF | Backlog | Downloadable narrative reporting artifact |
 
 ## Add a Feature Request
 

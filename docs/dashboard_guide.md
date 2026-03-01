@@ -50,13 +50,40 @@ Note: The main section is stateful. Reruns keep the selected section instead of 
     - twist scenarios (pivot at `6M`): `+/-5/10 bps` with opposite signs left vs right of pivot
     - shock materialization: `Instant` and `Linear 12M`
     - pricing basis: contractual + refill/growth (existing contractual interest unchanged by shocks)
-    - `Scenario Impact Matrix` with yearly (`Y1..Y5`) and 5Y cumulative deltas
-    - selected-scenario monthly chart (`Delta vs Base`, base/shocked totals, cumulative delta)
+    - `Scenario Impact Matrix` with `Matrix view` toggle:
+      - `Delta`: yearly (`Y1..Y5`) and 5Y cumulative deltas
+      - `Absolute`: yearly (`Y1..Y5`) and 5Y cumulative absolute totals (includes `BaseCase`)
+    - selected-scenario monthly chart with `Detail view` toggle:
+      - `Delta`: `Delta vs Base` + optional totals + cumulative delta
+      - `Absolute`: `BaseCase Total` and selected `Scenario Total` (includes `BaseCase` as selectable scenario)
     - anchor curve panel:
       - instant scenarios: base (`T2`) vs shocked (`T2`)
       - ramp scenarios: base (`T2`) plus shocked curves at month 6 and month 12
     - tenor movement chart for `1M`, `6M`, `1Y`, `5Y`, `10Y` over `0-24M`
       - ramp scenarios plateau after month 12
+    - `Scenario Builder` expander:
+      - located at the bottom of Overview
+      - collapsed by default
+      - create custom scenarios (`Parallel`, `Twist`, `Manual Tenors`)
+      - select materialization (`Instant`, `Linear 12M`)
+      - custom twist scenarios allow user-defined pivot tenor (months)
+      - manual scenarios allow selecting interpolation nodes on fixed tenors
+      - manual scenarios show interpolation preview before saving:
+        - `Shock (bps)` mode
+        - `Base + Final Shocked Curve (%)` mode
+      - manage active scenario set used by calculations
+      - delete custom scenarios
+      - scenario changes trigger cache clear + full recomputation
+  - `Export Executive Pack`:
+    - `Generate Executive Excel` button in Overview
+    - download button appears after generation
+    - download includes:
+      - `Summary_Metadata`
+      - `Overview_Metrics`
+      - `Scenario_Matrix_Delta`
+      - `Scenario_Matrix_Absolute` (includes `BaseCase`)
+      - `Distribution_Month_Tenor_Y1` (T2-anchored first 12 months)
+      - `Distribution_Monthly_Summary_Y1`
 - With `T2` disabled:
   - compact single-view summary cards
   - hint to enable comparison mode
@@ -106,4 +133,5 @@ Note: The main section is stateful. Reruns keep the selected section instead of 
 - Interest is reported in EUR with 30/360 conventions.
 - If `Deal_Data.product` is missing, the loader assigns `Default` to preserve compatibility with legacy inputs.
 - Cache refresh is manual: if workbook contents change at the same file path, click `Refresh Cached Calculations`.
+- Custom scenario persistence file: `.nii_custom_scenarios.json` in workspace root.
 

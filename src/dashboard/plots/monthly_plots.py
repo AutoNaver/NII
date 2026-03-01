@@ -1,4 +1,4 @@
-"""Plot builders for monthly bucket activity views."""
+﻿"""Plot builders for monthly bucket activity views."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def render_deal_count_activity(activity_df: pd.DataFrame, title: str) -> None:
     fig.update_layout(title=title, barmode='group')
     fig.update_yaxes(title='Deal Count')
     fig = apply_plot_layout_hygiene(fig)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 
 def render_notional_coupon_activity(activity_df: pd.DataFrame, title: str) -> None:
@@ -53,4 +53,5 @@ def render_notional_coupon_activity(activity_df: pd.DataFrame, title: str) -> No
     fig.update_layout(title=title, barmode='group')
     fig.update_yaxes(title='Notional * Coupon')
     fig = apply_plot_layout_hygiene(fig)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
+

@@ -42,7 +42,23 @@ Streamlit app for month-end Net Interest Income analytics with runoff decomposit
   - twist scenarios (pivot 6M): `+/-5/10 bps` (left/right of 6M receive opposite signs)
   - profiles: `Instant` and `Linear 12M`
   - pricing basis: contractual + refill/growth impact (existing contractual interest unchanged by shocks)
-  - visuals: impact matrix, selected-scenario detail chart, anchor-curve comparison (ramp: base + shocked 6M/12M), tenor movement (`1M/6M/1Y/5Y/10Y`, `0-24M`, plateau after month 12)
+  - visuals: impact matrix (`Delta`/`Absolute`), selected-scenario detail chart (`Delta`/`Absolute` with `BaseCase`), anchor-curve comparison (ramp: base + shocked 6M/12M), tenor movement (`1M/6M/1Y/5Y/10Y`, `0-24M`, plateau after month 12)
+  - custom scenario builder in Overview:
+    - shown at the bottom of Overview, collapsed by default
+    - create custom `parallel`, `twist`, or `manual tenor` scenarios with `Instant` or `Linear 12M` materialization
+    - for custom twist scenarios, pivot tenor is user-configurable (months)
+    - for manual scenarios, selected tenor nodes drive interpolation (unselected nodes ignored)
+    - manual scenarios include interpolation preview modes:
+      - shock-only interpolation
+      - base + final shocked curve (shock applied on selected anchor curve)
+    - save/delete custom scenarios across restarts
+    - persist active scenario set and recompute on changes
+- Overview now supports executive Excel export:
+  - `Generate Executive Excel` action in Overview (followed by download button)
+  - downloadable `.xlsx` pack with:
+    - metadata and overview metrics
+    - scenario sensitivity matrices (`Delta` and `Absolute` with `BaseCase`)
+    - first-year refill/growth distribution (`month x tenor`) and monthly summary
 
 ## Current Scope
 - Fixed-rate portfolio analytics on a 30/360 basis.
@@ -78,4 +94,3 @@ pytest -q
 - Add new feature ideas to `docs/feature_requests.md`.
 - Update `docs/feature_overview.md` when feature status changes.
 - Keep this README concise; detailed usage belongs in `docs/dashboard_guide.md`.
-

@@ -23,6 +23,7 @@ This file is the team-managed backlog for proposed features.
 | Request ID | Title | Requested By | Priority | Status | Target Release | Summary | Dependencies |
 |---|---|---|---|---|---|---|---|
 | FR-002 | Clarity-first dashboard refresh | Team | High | Done | Current | Sidebar controls, tabbed IA, runoff chart/table pairing, compact deal-diff section, and doc sync completed | None |
+| FR-006 | Executive Excel export pack | Team | High | Done | Current | Overview-triggered generate/download `.xlsx` pack with metadata, metrics, scenario delta/absolute matrices, and first-year refill/growth distribution sheets | openpyxl |
 
 ## Request Template
 

@@ -2,7 +2,11 @@ import numpy as np
 import pandas as pd
 
 from src.dashboard.plots.runoff_plots import _compute_refill_growth_components_anchor_safe
+from src.dashboard.plots.runoff_plots import _build_scenario_total_series
+from src.dashboard.plots.runoff_plots import _build_aggregation_windows
+from src.dashboard.plots.runoff_plots import _build_scenario_component_series
 from src.dashboard.plots.runoff_plots import _growth_outstanding_profile
+from src.dashboard.plots.runoff_plots import _reconciled_total_from_components
 from src.dashboard.plots.runoff_plots import _refill_allocation_heatmap
 from src.dashboard.plots.runoff_plots import _refill_volume_interest_chart
 from src.dashboard.plots.runoff_plots import _shifted_portfolio_refill_weights
@@ -189,3 +193,106 @@ def test_growth_outstanding_profile_preserves_negative_liability_growth() -> Non
         basis='T1',
     )
     assert out.tolist() == [0.0, -10.0, -15.0]
+
+
+def test_build_scenario_total_series_aligns_months_and_adds_delta() -> None:
+    base_total = pd.Series([100.0, 110.0, 120.0], dtype=float)
+    month_ends = pd.to_datetime(['2025-01-31', '2025-02-28', '2025-03-31'])
+    scenario_monthly = pd.DataFrame(
+        {
+            'scenario_id': ['inst_up_50', 'inst_up_50'],
+            'calendar_month_end': pd.to_datetime(['2025-01-31', '2025-03-31']),
+            'delta_vs_base': [5.0, 15.0],
+        }
+    )
+    out = _build_scenario_total_series(
+        base_total=base_total,
+        month_ends=pd.Series(month_ends),
+        scenario_monthly=scenario_monthly,
+        scenario_id='inst_up_50',
+    )
+    assert out is not None
+    assert out.tolist() == [105.0, 110.0, 135.0]
+
+
+def test_build_scenario_total_series_base_case_returns_base_total() -> None:
+    base_total = pd.Series([10.0, 20.0, 30.0], dtype=float)
+    out = _build_scenario_total_series(
+        base_total=base_total,
+        month_ends=pd.Series(pd.to_datetime(['2025-01-31', '2025-02-28', '2025-03-31'])),
+        scenario_monthly=None,
+        scenario_id='__base__',
+    )
+    assert out is not None
+    assert out.tolist() == [10.0, 20.0, 30.0]
+
+
+def test_build_aggregation_windows_supports_full_horizon_mode() -> None:
+    month_ends = pd.Series(pd.to_datetime(['2025-01-31', '2025-02-28', '2025-03-31']))
+    windows = _build_aggregation_windows(month_ends, 'Full Horizon')
+    assert len(windows) == 1
+    label, mask = windows[0]
+    assert label == 'All (Full Horizon)'
+    assert bool(mask.all())
+
+
+def test_build_aggregation_windows_next_5_years_starts_at_anchor_month() -> None:
+    month_ends = pd.Series(pd.date_range('2025-01-31', periods=60, freq='ME'))
+    windows = _build_aggregation_windows(month_ends, 'Next 5 Years')
+    labels = [w[0] for w in windows]
+    assert labels == ['All (Y1-Y5)', 'Y1', 'Y2', 'Y3', 'Y4', 'Y5']
+    masks = {label: mask for label, mask in windows}
+    assert int(pd.Series(masks['All (Y1-Y5)']).sum()) == 60
+    assert int(pd.Series(masks['Y1']).sum()) == 12
+    # First point must be in Y1
+    assert bool(pd.Series(masks['Y1']).iloc[0]) is True
+
+
+def test_build_scenario_component_series_maps_shocked_component_by_month() -> None:
+    base_component = pd.Series([1.0, 2.0, 3.0], dtype=float)
+    month_ends = pd.Series(pd.to_datetime(['2025-01-31', '2025-02-28', '2025-03-31']))
+    scenario_monthly = pd.DataFrame(
+        {
+            'scenario_id': ['inst_up_50', 'inst_up_50'],
+            'calendar_month_end': pd.to_datetime(['2025-01-31', '2025-03-31']),
+            'refill_interest_shocked': [10.0, 30.0],
+        }
+    )
+    out = _build_scenario_component_series(
+        base_component=base_component,
+        month_ends=month_ends,
+        scenario_monthly=scenario_monthly,
+        scenario_id='inst_up_50',
+        value_column='refill_interest_shocked',
+    )
+    assert out is not None
+    assert out.tolist() == [10.0, 2.0, 30.0]
+
+
+def test_build_scenario_component_series_base_case_uses_base_component() -> None:
+    base_component = pd.Series([4.0, 5.0], dtype=float)
+    out = _build_scenario_component_series(
+        base_component=base_component,
+        month_ends=pd.Series(pd.to_datetime(['2025-01-31', '2025-02-28'])),
+        scenario_monthly=pd.DataFrame(),
+        scenario_id='__base__',
+        value_column='growth_interest_shocked',
+    )
+    assert out is not None
+    assert out.tolist() == [4.0, 5.0]
+
+
+def test_reconciled_total_from_components_matches_stack_identity() -> None:
+    existing = pd.Series([100.0, 80.0], dtype=float)
+    added = pd.Series([10.0, 5.0], dtype=float)
+    matured = pd.Series([20.0, 15.0], dtype=float)
+    refilled = pd.Series([7.0, 8.0], dtype=float)
+    growth = pd.Series([1.0, 2.0], dtype=float)
+    out = _reconciled_total_from_components(
+        existing=existing,
+        added=added,
+        matured=matured,
+        refilled=refilled,
+        growth=growth,
+    )
+    assert out.tolist() == [98.0, 80.0]

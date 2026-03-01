@@ -38,6 +38,14 @@ For each month-end:
     - tenors `< 6M` and `> 6M` receive opposite signed shocks
     - `twist up`: right side up, left side down
     - `twist down`: right side down, left side up
+  - custom manual-tenor shocks:
+    - user-defined node shocks on fixed tenors (`1M, 3M, 6M, 1Y, 2Y, 5Y, 10Y, 20Y`)
+    - only selected nodes are used for interpolation
+    - linear tenor interpolation with endpoint clamping
+    - UI preview modes:
+      - interpolated shock curve vs selected nodes
+      - base curve plus final shocked curve
+  - custom twist scenarios can use user-defined pivot tenor in months
 - Materialization paths:
   - instant at month 0
   - linear ramp to full shock over 12 months
@@ -50,3 +58,6 @@ For each month-end:
   - refill and growth remuneration are re-priced using shocked curve rates
   - existing contractual interest remains unchanged by rate shocks
 - Down shocks are not floored; negative rates are allowed.
+- Custom scenario persistence:
+  - workspace-local store `.nii_custom_scenarios.json`
+  - active/inactive scenario set persists across restarts

@@ -1,7 +1,8 @@
-"""Streamlit app entrypoint for NII dashboard MVP."""
+﻿"""Streamlit app entrypoint for NII dashboard MVP."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 
@@ -18,7 +19,7 @@ from src.calculations.nii import (
     compare_month_ends,
     compute_monthly_realized_nii,
 )
-from src.calculations.rate_scenarios import simulate_rate_scenarios
+from src.calculations.rate_scenarios import normalize_scenarios_df, simulate_rate_scenarios
 from src.calculations.refill_growth import (
     compute_refill_growth_components_anchor_safe,
     growth_outstanding_profile,
@@ -31,6 +32,7 @@ from src.calculations.volumes import (
 from src.dashboard.components.controls import coerce_option, render_global_controls, render_runoff_controls
 from src.dashboard.components.deal_diff_table import render_deal_diff_tables
 from src.dashboard.components.formatting import style_numeric_table
+from src.dashboard.components.rate_scenario_builder import render_rate_scenario_builder
 from src.dashboard.components.summary_cards import render_summary_cards
 from src.dashboard.plots.interest_daily import render_daily_interest_chart
 from src.dashboard.plots.rate_scenario_plots import (
@@ -39,6 +41,22 @@ from src.dashboard.plots.rate_scenario_plots import (
     build_selected_scenario_impact_figure,
 )
 from src.dashboard.plots.runoff_plots import render_calendar_runoff_charts, render_runoff_delta_charts
+from src.dashboard.reporting.export_pack import (
+    build_export_context,
+    build_export_workbook_bytes,
+    default_export_filename,
+)
+from src.dashboard.scenario_store import (
+    SCENARIO_STORE_FILENAME,
+    STORE_VERSION,
+    add_custom_scenario,
+    build_active_scenarios_df,
+    build_scenario_universe_df,
+    delete_custom_scenario,
+    load_scenario_store,
+    save_scenario_store,
+    validate_custom_scenario,
+)
 from src.data.loader import load_input_workbook
 from src.utils.date_utils import month_end_sequence, previous_calendar_month_window
 
@@ -48,6 +66,30 @@ DEFAULT_INPUT_PATH = PROJECT_ROOT / 'Input.xlsx'
 @st.cache_data
 def _load(path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     return load_input_workbook(path)
+
+
+def _sanitize_for_json(value):
+    if isinstance(value, dict):
+        return {str(k): _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_for_json(v) for v in value]
+    if isinstance(value, tuple):
+        return [_sanitize_for_json(v) for v in value]
+    if value is None:
+        return None
+    if isinstance(value, (int, float, str, bool)):
+        if isinstance(value, float) and pd.isna(value):
+            return None
+        return value
+    if pd.isna(value):
+        return None
+    return str(value)
+
+
+def _serialize_scenarios_for_cache(scenarios_df: pd.DataFrame) -> str:
+    records = scenarios_df.to_dict(orient='records') if scenarios_df is not None else []
+    safe_records = [_sanitize_for_json(r) for r in records]
+    return json.dumps(safe_records, sort_keys=True)
 
 
 def _normalize_products(deals_df: pd.DataFrame) -> pd.DataFrame:
@@ -120,6 +162,9 @@ def _cached_rate_scenario_projection(
     basis: str,
     growth_mode: str,
     growth_monthly_value: float,
+    scenarios_payload_json: str,
+    active_ids_json: str,
+    horizon_months: int = 60,
 ) -> dict[str, pd.DataFrame | str]:
     deals_df, curve_df = _load(path)
     deals_df = _filter_deals_by_product(deals_df, product)
@@ -136,7 +181,7 @@ def _cached_rate_scenario_projection(
 
     t1_me = pd.Timestamp(t1) + pd.offsets.MonthEnd(0)
     t2_me = pd.Timestamp(t2) + pd.offsets.MonthEnd(0)
-    horizon_months = 60
+    horizon_months = int(max(1, min(int(horizon_months), 240)))
     projection_months = pd.DatetimeIndex([t2_me + pd.offsets.MonthEnd(k) for k in range(horizon_months)])
 
     runoff_delta = _cached_runoff_delta(path, t1_me, t2_me, product)
@@ -183,6 +228,18 @@ def _cached_rate_scenario_projection(
     ).astype(float).reset_index(drop=True)
 
     tenor_months = pd.Series(range(1, horizon_months + 1), dtype=int)
+    scenario_df = pd.DataFrame()
+    try:
+        scenario_records = json.loads(str(scenarios_payload_json or '[]'))
+        if isinstance(scenario_records, list) and scenario_records:
+            scenario_df = normalize_scenarios_df(pd.DataFrame(scenario_records))
+        active_ids = json.loads(str(active_ids_json or '[]'))
+        if isinstance(active_ids, list) and not scenario_df.empty:
+            active_set = {str(x) for x in active_ids}
+            scenario_df = scenario_df[scenario_df['scenario_id'].astype(str).isin(active_set)].copy()
+    except Exception:
+        scenario_df = pd.DataFrame()
+
     try:
         return simulate_rate_scenarios(
             month_ends=pd.Series(projection_months),
@@ -192,6 +249,7 @@ def _cached_rate_scenario_projection(
             tenor_months=tenor_months,
             curve_df=curve_df,
             anchor_date=t2_me,
+            scenarios=scenario_df if not scenario_df.empty else None,
         )
     except Exception as exc:
         return {
@@ -514,6 +572,31 @@ def main() -> None:
 
     st.session_state['runoff_has_refill_views'] = True
 
+    scenario_store_path = PROJECT_ROOT / SCENARIO_STORE_FILENAME
+    scenario_store_warning = ''
+    try:
+        scenario_store_payload = load_scenario_store(str(scenario_store_path))
+    except Exception as exc:
+        scenario_store_warning = (
+            f'Failed to read scenario store `{scenario_store_path.name}`: {exc}. '
+            'Using built-in scenarios only for this run.'
+        )
+        scenario_store_payload = {
+            'version': STORE_VERSION,
+            'custom_scenarios': [],
+            'active_scenario_ids': [],
+        }
+    scenario_universe_df = build_scenario_universe_df(scenario_store_payload)
+    active_scenarios_df = build_active_scenarios_df(scenario_store_payload)
+    active_ids = active_scenarios_df['scenario_id'].astype(str).tolist()
+    scenario_payload_json = _serialize_scenarios_for_cache(active_scenarios_df)
+    active_ids_json = json.dumps(active_ids, sort_keys=True)
+    scenario_id_to_label = {
+        str(r['scenario_id']): str(r['scenario_label'])
+        for r in active_scenarios_df[['scenario_id', 'scenario_label']].to_dict(orient='records')
+    }
+    scenario_id_to_label['__base__'] = 'Base Case (No Shock)'
+
     month_ends = _available_month_ends(deals_df)
     if not month_ends:
         st.error(f'No month-end dates available for selected product `{selected_product}`.')
@@ -563,25 +646,41 @@ def main() -> None:
     row_t2 = monthly_t2[monthly_t2['month_end'] == t2].iloc[0]
 
     if selected_section == 'Overview':
+        overview_delta_kpis = {
+            'Realized NII Delta (EUR)': float(realized_nii_t2 - realized_nii_t1),
+            'Active Deals Delta': float(active_count_t2 - active_count_t1),
+            'Accrued Interest Delta (EUR)': float(accrued_t2 - accrued_t1),
+            'Volume Delta (EUR)': float(row_t2['total_active_notional']) - float(row_t1['total_active_notional']),
+            'Coupon Delta (pp)': (float(row_t2['weighted_avg_coupon']) - float(row_t1['weighted_avg_coupon'])) * 100.0,
+        }
         st.subheader('Monthly View Delta Summary (T2 - T1)')
         d1, d2, d3, d4, d5 = st.columns(5)
-        d1.metric('Realized NII Delta (EUR)', f'{(realized_nii_t2 - realized_nii_t1):,.2f}')
-        d2.metric('Active Deals Delta', f'{(active_count_t2 - active_count_t1):,d}')
-        d3.metric('Accrued Interest Delta (EUR)', f'{(accrued_t2 - accrued_t1):,.2f}')
+        d1.metric('Realized NII Delta (EUR)', f'{overview_delta_kpis["Realized NII Delta (EUR)"]:,.2f}')
+        d2.metric('Active Deals Delta', f'{int(overview_delta_kpis["Active Deals Delta"]):,d}')
+        d3.metric('Accrued Interest Delta (EUR)', f'{overview_delta_kpis["Accrued Interest Delta (EUR)"]:,.2f}')
         d4.metric(
             'Volume Delta (EUR)',
-            f'{(float(row_t2["total_active_notional"]) - float(row_t1["total_active_notional"])):,.2f}',
+            f'{overview_delta_kpis["Volume Delta (EUR)"]:,.2f}',
         )
         d5.metric(
             'Coupon Delta (pp)',
-            f'{((float(row_t2["weighted_avg_coupon"]) - float(row_t1["weighted_avg_coupon"])) * 100.0):.4f}',
+            f'{overview_delta_kpis["Coupon Delta (pp)"]:.4f}',
         )
 
         st.subheader('Monthly View Metrics (T1 vs T2)')
         metrics_table = _dual_view_metric_table(row_t1, row_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}')
-        st.dataframe(style_numeric_table(metrics_table), use_container_width=True)
+        st.dataframe(style_numeric_table(metrics_table), width='stretch')
 
         st.subheader('Rate Scenario Analysis (5Y, vs Base Case)')
+        if scenario_store_warning:
+            st.warning(scenario_store_warning)
+
+        scenarios_df = pd.DataFrame()
+        monthly_base = pd.DataFrame()
+        monthly_scenarios = pd.DataFrame()
+        yearly_summary = pd.DataFrame()
+        curve_points = pd.DataFrame()
+        tenor_paths = pd.DataFrame()
         scenario_result = _cached_rate_scenario_projection(
             input_path,
             t1,
@@ -590,6 +689,9 @@ def main() -> None:
             'T2',
             ui.get('growth_mode', 'constant'),
             float(ui.get('growth_monthly_value', 0.0)),
+            scenario_payload_json,
+            active_ids_json,
+            60,
         )
         scenario_error = str(scenario_result.get('error', '')) if isinstance(scenario_result, dict) else ''
         if scenario_error:
@@ -606,32 +708,38 @@ def main() -> None:
                 st.info('Rate scenario outputs are currently unavailable for this selection.')
             else:
                 st.caption('Scenario Impact Matrix')
-                matrix_df = build_scenario_matrix_table(yearly_summary)
+                matrix_options = ['Delta', 'Absolute']
+                matrix_current = coerce_option(
+                    st.session_state.get('overview_rate_matrix_view', matrix_options[0]),
+                    matrix_options,
+                    matrix_options[0],
+                )
+                matrix_view = st.radio(
+                    'Matrix view',
+                    options=matrix_options,
+                    index=matrix_options.index(matrix_current),
+                    horizontal=True,
+                    key='overview_rate_matrix_view',
+                )
+                matrix_df = build_scenario_matrix_table(
+                    yearly_summary,
+                    view_mode=('absolute' if matrix_view == 'Absolute' else 'delta'),
+                    monthly_base=monthly_base,
+                    monthly_scenarios=monthly_scenarios,
+                )
                 numeric_cols = [c for c in matrix_df.columns if c != 'Scenario']
+                matrix_cmap = 'YlGnBu' if matrix_view == 'Absolute' else 'RdYlGn'
                 matrix_styler = (
                     matrix_df.style
                     .format({col: '{:,.2f}' for col in numeric_cols})
-                    .background_gradient(cmap='RdYlGn', subset=numeric_cols)
+                    .background_gradient(cmap=matrix_cmap, subset=numeric_cols)
                 )
-                st.dataframe(matrix_styler, use_container_width=True)
+                st.dataframe(matrix_styler, width='stretch')
 
                 labels = scenarios_df['scenario_label'].astype(str).tolist()
-                label_default = labels[0]
-                selected_label = coerce_option(
-                    st.session_state.get('overview_rate_scenario', label_default),
-                    labels,
-                    label_default,
-                )
                 c_s1, c_s2 = st.columns([2, 2])
-                with c_s1:
-                    selected_label = st.selectbox(
-                        'Detail scenario',
-                        options=labels,
-                        index=labels.index(selected_label),
-                        key='overview_rate_scenario',
-                    )
                 with c_s2:
-                    detail_options = ['Delta + Total', 'Delta Only']
+                    detail_options = ['Delta', 'Absolute']
                     detail_current = coerce_option(
                         st.session_state.get('overview_rate_detail_view', detail_options[0]),
                         detail_options,
@@ -645,28 +753,185 @@ def main() -> None:
                         key='overview_rate_detail_view',
                     )
 
-                selected_scenario_id = str(
-                    scenarios_df.loc[scenarios_df['scenario_label'] == selected_label, 'scenario_id'].iloc[0]
-                )
+                scenario_label_to_id = {
+                    str(r['scenario_label']): str(r['scenario_id'])
+                    for r in scenarios_df[['scenario_id', 'scenario_label']].to_dict(orient='records')
+                }
+                base_case_label = 'BaseCase'
+                with c_s1:
+                    if detail_view == 'Absolute':
+                        absolute_labels = [base_case_label] + labels
+                        selected_label = coerce_option(
+                            st.session_state.get('overview_rate_scenario', absolute_labels[0]),
+                            absolute_labels,
+                            absolute_labels[0],
+                        )
+                        selected_label = st.selectbox(
+                            'Detail scenario',
+                            options=absolute_labels,
+                            index=absolute_labels.index(selected_label),
+                            key='overview_rate_scenario',
+                        )
+                        selected_scenario_id = (
+                            '__base__' if selected_label == base_case_label else scenario_label_to_id[selected_label]
+                        )
+                    else:
+                        label_default = labels[0]
+                        selected_label = coerce_option(
+                            st.session_state.get('overview_rate_scenario', label_default),
+                            labels,
+                            label_default,
+                        )
+                        selected_label = st.selectbox(
+                            'Detail scenario',
+                            options=labels,
+                            index=labels.index(selected_label),
+                            key='overview_rate_scenario',
+                        )
+                        selected_scenario_id = scenario_label_to_id[selected_label]
+
                 detail_fig = build_selected_scenario_impact_figure(
                     monthly_base=monthly_base,
                     monthly_scenarios=monthly_scenarios,
                     scenario_id=selected_scenario_id,
                     scenario_label=selected_label,
-                    show_totals=(detail_view == 'Delta + Total'),
+                    view_mode=('absolute' if detail_view == 'Absolute' else 'delta'),
+                    show_totals=True,
                 )
-                st.plotly_chart(detail_fig, use_container_width=True, key='overview_rate_detail_chart')
+                st.plotly_chart(detail_fig, width='stretch', key='overview_rate_detail_chart')
 
                 if curve_points.empty and tenor_paths.empty:
                     st.info('Curve visualization unavailable for current scenario selection.')
                 else:
-                    curve_fig = build_curve_comparison_figure(
-                        curve_points=curve_points,
-                        tenor_paths=tenor_paths,
-                        scenario_id=selected_scenario_id,
-                        scenario_label=selected_label,
-                    )
-                    st.plotly_chart(curve_fig, use_container_width=True, key='overview_rate_curve_chart')
+                    if selected_scenario_id == '__base__':
+                        st.info('Curve comparison is available for shocked scenarios. Select a non-base scenario.')
+                    else:
+                        curve_fig = build_curve_comparison_figure(
+                            curve_points=curve_points,
+                            tenor_paths=tenor_paths,
+                            scenario_id=selected_scenario_id,
+                            scenario_label=selected_label,
+                        )
+                        st.plotly_chart(curve_fig, width='stretch', key='overview_rate_curve_chart')
+
+        st.caption('Export Executive Pack')
+        export_signature = (
+            f'{input_path}|{selected_product}|{pd.Timestamp(t1).date().isoformat()}|'
+            f'{pd.Timestamp(t2).date().isoformat()}|{ui.get("growth_mode", "constant")}|'
+            f'{float(ui.get("growth_monthly_value", 0.0))}|{active_ids_json}'
+        )
+        if st.session_state.get('overview_export_signature') != export_signature:
+            st.session_state['overview_export_signature'] = export_signature
+            st.session_state.pop('overview_export_bytes', None)
+            st.session_state.pop('overview_export_filename', None)
+
+        c_export_1, c_export_2 = st.columns([1, 2])
+        with c_export_1:
+            generate_export = st.button('Generate Executive Excel', key='overview_generate_export')
+        if generate_export:
+            try:
+                runoff_delta_export = _cached_runoff_delta(input_path, t1, t2, selected_product)
+                calendar_runoff_export = _cached_calendar_runoff(input_path, t1, t2, True, selected_product)
+                export_context = build_export_context(
+                    path=input_path,
+                    product=selected_product,
+                    t1=t1,
+                    t2=t2,
+                    growth_mode=ui.get('growth_mode', 'constant'),
+                    growth_monthly_value=float(ui.get('growth_monthly_value', 0.0)),
+                    scenario_payload_json=scenario_payload_json,
+                    active_ids_json=active_ids_json,
+                    overview_metrics=metrics_table,
+                    overview_delta_kpis=overview_delta_kpis,
+                    yearly_summary=yearly_summary,
+                    monthly_base=monthly_base,
+                    monthly_scenarios=monthly_scenarios,
+                    calendar_runoff=calendar_runoff_export,
+                    runoff_delta=runoff_delta_export,
+                    curve_df=curve_df,
+                )
+                workbook_bytes = build_export_workbook_bytes(
+                    export_context,
+                    workbook_title='NII Executive Export Pack',
+                )
+                st.session_state['overview_export_bytes'] = workbook_bytes
+                st.session_state['overview_export_filename'] = default_export_filename(selected_product, t1, t2)
+                st.success('Executive export generated. Use the download button to save the workbook.')
+            except Exception as exc:
+                st.error(f'Failed to generate executive export: {exc}')
+
+        if st.session_state.get('overview_export_bytes') is not None:
+            with c_export_2:
+                st.download_button(
+                    label='Download Executive Pack (.xlsx)',
+                    data=st.session_state['overview_export_bytes'],
+                    file_name=st.session_state.get('overview_export_filename', default_export_filename(selected_product, t1, t2)),
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    key='overview_download_export',
+                )
+
+        # Keep builder at the very bottom of Overview.
+        st.markdown('---')
+        custom_scenarios_df = scenario_universe_df[
+            scenario_universe_df['scenario_id'].astype(str).str.startswith('custom_')
+        ].copy()
+        active_ids_default = active_scenarios_df['scenario_id'].astype(str).tolist()
+        builder_actions = render_rate_scenario_builder(
+            scenario_universe_df=scenario_universe_df,
+            custom_scenarios_df=custom_scenarios_df,
+            active_scenario_ids=active_ids_default,
+            curve_df=curve_df,
+            preview_anchor_date=pd.Timestamp(t2) if t2 is not None else pd.Timestamp(t1),
+        )
+        builder_error = str(builder_actions.get('error', '') or '')
+        if builder_error:
+            st.error(builder_error)
+
+        add_spec = builder_actions.get('add_scenario')
+        if isinstance(add_spec, dict):
+            is_valid, msg = validate_custom_scenario(add_spec)
+            labels_lower = {str(x).strip().lower() for x in scenario_universe_df['scenario_label'].astype(str).tolist()}
+            ids = {str(x).strip() for x in scenario_universe_df['scenario_id'].astype(str).tolist()}
+            if not is_valid:
+                st.error(msg)
+            elif str(add_spec['scenario_label']).strip().lower() in labels_lower:
+                st.error(f'Scenario name `{add_spec["scenario_label"]}` already exists.')
+            elif str(add_spec['scenario_id']).strip() in ids:
+                st.error(
+                    f'Scenario id `{add_spec["scenario_id"]}` already exists (name collision after slug sanitization).'
+                )
+            else:
+                updated_payload = add_custom_scenario(scenario_store_payload, add_spec)
+                try:
+                    save_scenario_store(str(scenario_store_path), updated_payload)
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f'Failed to save scenario store: {exc}')
+
+        delete_id = builder_actions.get('delete_scenario_id')
+        if delete_id:
+            updated_payload = delete_custom_scenario(scenario_store_payload, str(delete_id))
+            try:
+                save_scenario_store(str(scenario_store_path), updated_payload)
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as exc:
+                st.error(f'Failed to update scenario store: {exc}')
+
+        set_active_ids = builder_actions.get('set_active_ids')
+        if isinstance(set_active_ids, list):
+            if not set_active_ids:
+                st.warning('At least one active scenario is required.')
+            elif set(set_active_ids) != set(active_ids_default):
+                updated_payload = dict(scenario_store_payload)
+                updated_payload['active_scenario_ids'] = [str(x) for x in set_active_ids]
+                try:
+                    save_scenario_store(str(scenario_store_path), updated_payload)
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f'Failed to persist active scenario set: {exc}')
 
     elif selected_section == 'Daily':
         st.caption(
@@ -680,8 +945,33 @@ def main() -> None:
         render_daily_interest_chart(daily_t1, daily_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}')
 
     elif selected_section == 'Runoff':
-        runoff_ui = render_runoff_controls(default_basis=ui['runoff_decomposition_basis'])
+        runoff_ui = render_runoff_controls(
+            default_basis=ui['runoff_decomposition_basis'],
+            scenario_options=active_scenarios_df[['scenario_id', 'scenario_label']].to_dict(orient='records'),
+        )
         full_ui = {**ui, **runoff_ui}
+        scenario_monthly_for_runoff = pd.DataFrame()
+        if (
+            str(full_ui.get('runoff_chart_view', '')) == 'Effective Interest Decomposition (Refill/Growth)'
+            and bool(full_ui.get('runoff_scenario_compare_enabled', False))
+        ):
+            if str(full_ui.get('runoff_decomposition_basis', 'T2')) != 'T2':
+                st.info('Scenario comparison in this chart is available for T2 basis only.')
+            else:
+                scenario_result = _cached_rate_scenario_projection(
+                    input_path,
+                    t1,
+                    t2,
+                    selected_product,
+                    'T2',
+                    ui.get('growth_mode', 'constant'),
+                    float(ui.get('growth_monthly_value', 0.0)),
+                    scenario_payload_json,
+                    active_ids_json,
+                    240,
+                )
+                if isinstance(scenario_result, dict):
+                    scenario_monthly_for_runoff = scenario_result.get('monthly_scenarios', pd.DataFrame())
 
         if ui['runoff_display_mode'] == 'Aligned Buckets (Remaining Maturity)':
             runoff_delta = _cached_runoff_delta(input_path, t1, t2, selected_product)
@@ -694,10 +984,12 @@ def main() -> None:
                 refill_logic_df=None,
                 curve_df=curve_df,
                 ui_state=full_ui,
+                scenario_monthly=scenario_monthly_for_runoff,
+                scenario_label_map=scenario_id_to_label,
             )
             bucket_table = _build_runoff_bucket_table(runoff_delta, t1, t2)
             bucket_table = _filter_runoff_bucket_table_by_view(bucket_table, selected_view)
-            st.dataframe(style_numeric_table(bucket_table), use_container_width=True)
+            st.dataframe(style_numeric_table(bucket_table), width='stretch')
         else:
             basis = ui['runoff_decomposition_basis']
             anchor = pd.Timestamp(t1 if basis == 'T1' else t2) + pd.offsets.MonthEnd(0)
@@ -723,10 +1015,12 @@ def main() -> None:
                 refill_logic_df=None,
                 curve_df=curve_df,
                 ui_state=full_ui,
+                scenario_monthly=scenario_monthly_for_runoff,
+                scenario_label_map=scenario_id_to_label,
             )
             calendar_table = _build_runoff_calendar_table(filtered, t1, t2)
             calendar_table = _filter_runoff_calendar_table_by_view(calendar_table, selected_view)
-            st.dataframe(style_numeric_table(calendar_table), use_container_width=True)
+            st.dataframe(style_numeric_table(calendar_table), width='stretch')
 
     else:
         diff = _cached_compare_month_ends(input_path, t1, t2, selected_product)
@@ -735,3 +1029,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
