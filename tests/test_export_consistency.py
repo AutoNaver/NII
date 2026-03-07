@@ -52,11 +52,11 @@ def test_export_scenario_matrices_match_source_logic() -> None:
         growth_monthly_value=0.0,
         scenario_payload_json='[{"scenario_id":"inst_up_50","scenario_label":"Instant +50 bps"}]',
         active_ids_json='["inst_up_50"]',
-        overview_metrics=pd.DataFrame(),
-        overview_delta_kpis={},
-        yearly_summary=yearly_summary,
-        monthly_base=monthly_base,
-        monthly_scenarios=monthly_scenarios,
+        overview_metrics_by_layer={'Internal': pd.DataFrame()},
+        overview_delta_kpis_by_layer={'Internal': {}},
+        yearly_summary_by_layer={'Internal': yearly_summary},
+        monthly_base_by_layer={'Internal': monthly_base},
+        monthly_scenarios_by_layer={'Internal': monthly_scenarios},
         calendar_runoff=pd.DataFrame({'calendar_month_end': months}),
         runoff_delta=pd.DataFrame(),
         curve_df=pd.DataFrame(),
@@ -68,8 +68,7 @@ def test_export_scenario_matrices_match_source_logic() -> None:
         monthly_base=monthly_base,
         monthly_scenarios=monthly_scenarios,
     ).reset_index(drop=True)
-    got_delta = pd.DataFrame(ctx['scenario_matrix_delta']).reset_index(drop=True)
-    got_abs = pd.DataFrame(ctx['scenario_matrix_absolute']).reset_index(drop=True)
+    got_delta = pd.DataFrame(ctx['scenario_matrix_delta']).drop(columns=['Layer']).reset_index(drop=True)
+    got_abs = pd.DataFrame(ctx['scenario_matrix_absolute']).drop(columns=['Layer']).reset_index(drop=True)
     pd.testing.assert_frame_equal(got_delta, expected_delta)
     pd.testing.assert_frame_equal(got_abs, expected_abs)
-

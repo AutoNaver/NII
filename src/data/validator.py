@@ -1,4 +1,4 @@
-﻿"""Input data validation for deals and curve tables."""
+"""Input data validation for deals and curve tables."""
 
 from __future__ import annotations
 
@@ -14,6 +14,16 @@ DEAL_REQUIRED_COLUMNS = [
 ]
 
 CURVE_REQUIRED_COLUMNS = ['ir_date', 'ir_tenor', 'rate']
+EXTERNAL_PROFILE_REQUIRED_COLUMNS = [
+    'product',
+    'external_product_type',
+    'calendar_month_end',
+    'external_notional',
+    'repricing_tenor_months',
+    'manual_rate',
+]
+EXTERNAL_MODEL_MANUAL_PROFILE = 'manual_profile'
+EXTERNAL_MODEL_DAILY_DUE_SAVINGS = 'daily_due_savings'
 
 
 def _missing_columns(df: pd.DataFrame, required: list[str]) -> list[str]:
@@ -84,5 +94,62 @@ def validate_curve(df: pd.DataFrame) -> list[str]:
     dupes = df.duplicated(subset=['ir_date', 'ir_tenor']).sum()
     if dupes:
         warnings.append(f'{dupes} duplicate curve points found (ir_date, ir_tenor).')
+
+    return warnings
+
+
+def validate_external_profile(df: pd.DataFrame) -> list[str]:
+    """Validate normalized external profile data and return non-fatal warnings."""
+    missing = _missing_columns(df, EXTERNAL_PROFILE_REQUIRED_COLUMNS)
+    if missing:
+        raise ValueError(f'Missing required external profile columns: {missing}')
+
+    warnings: list[str] = []
+    work = df.copy()
+
+    if work[['product', 'external_product_type']].isna().any().any():
+        raise ValueError('External profile requires non-null product and external_product_type.')
+
+    if not pd.api.types.is_datetime64_any_dtype(work['calendar_month_end']):
+        raise ValueError('Column calendar_month_end must be datetime64 dtype.')
+    for col in ['external_notional', 'repricing_tenor_months', 'manual_rate']:
+        if not pd.api.types.is_numeric_dtype(work[col]):
+            raise ValueError(f'Column {col} must be numeric dtype.')
+
+    work['external_product_type'] = work['external_product_type'].astype(str).str.strip().str.lower()
+
+    manual = work[work['external_product_type'] == EXTERNAL_MODEL_MANUAL_PROFILE].copy()
+    if not manual.empty:
+        required = ['product', 'external_product_type', 'calendar_month_end', 'repricing_tenor_months', 'manual_rate']
+        if manual[required].isna().any().any():
+            raise ValueError(
+                'Manual-profile external rows require product, external_product_type, calendar_month_end, repricing_tenor_months, and manual_rate.'
+            )
+        if manual.duplicated(subset=['product', 'external_product_type', 'calendar_month_end']).any():
+            raise ValueError(
+                'Duplicate external profile rows found for (product, external_product_type, calendar_month_end).'
+            )
+        non_positive_tenor = int((pd.to_numeric(manual['repricing_tenor_months'], errors='coerce') <= 0).sum())
+        if non_positive_tenor:
+            warnings.append(f'{non_positive_tenor} manual-profile rows have repricing tenor <= 0 months.')
+        high_rate = int((pd.to_numeric(manual['manual_rate'], errors='coerce').abs() > 1.0).sum())
+        if high_rate:
+            warnings.append(f'{high_rate} manual-profile rows have manual_rate magnitude > 100%.')
+
+    savings = work[work['external_product_type'] == EXTERNAL_MODEL_DAILY_DUE_SAVINGS].copy()
+    if not savings.empty:
+        if savings.duplicated(subset=['product', 'external_product_type']).any():
+            raise ValueError('Duplicate daily-due-savings external rows found for (product, external_product_type).')
+
+    other = work[~work['external_product_type'].isin([EXTERNAL_MODEL_MANUAL_PROFILE, EXTERNAL_MODEL_DAILY_DUE_SAVINGS])].copy()
+    if not other.empty:
+        if other.duplicated(subset=['product', 'external_product_type', 'calendar_month_end']).any():
+            raise ValueError(
+                'Duplicate external profile rows found for (product, external_product_type, calendar_month_end).'
+            )
+
+    zero_notional = int((pd.to_numeric(work['external_notional'], errors='coerce').fillna(0.0) == 0).sum())
+    if zero_notional:
+        warnings.append(f'{zero_notional} external profile rows have zero or missing external_notional.')
 
     return warnings

@@ -112,11 +112,15 @@ def test_build_export_workbook_bytes_contains_expected_sheets() -> None:
         growth_monthly_value=100_000.0,
         scenario_payload_json='[{"scenario_id":"inst_up_50","scenario_label":"Instant +50 bps"}]',
         active_ids_json='["inst_up_50"]',
-        overview_metrics=fx['overview_metrics'],
-        overview_delta_kpis={'Realized NII Delta (EUR)': 123.0},
-        yearly_summary=fx['yearly_summary'],
-        monthly_base=fx['monthly_base'],
-        monthly_scenarios=fx['monthly_scenarios'],
+        overview_metrics_by_layer={'Internal': fx['overview_metrics'], 'External': fx['overview_metrics'], 'Net': fx['overview_metrics']},
+        overview_delta_kpis_by_layer={
+            'Internal': {'Realized NII Delta (EUR)': 123.0},
+            'External': {'Realized NII Delta (EUR)': 25.0},
+            'Net': {'Realized NII Delta (EUR)': 148.0},
+        },
+        yearly_summary_by_layer={'Internal': fx['yearly_summary'], 'External': fx['yearly_summary'], 'Net': fx['yearly_summary']},
+        monthly_base_by_layer={'Internal': fx['monthly_base'], 'External': fx['monthly_base'], 'Net': fx['monthly_base']},
+        monthly_scenarios_by_layer={'Internal': fx['monthly_scenarios'], 'External': fx['monthly_scenarios'], 'Net': fx['monthly_scenarios']},
         calendar_runoff=fx['calendar_runoff'],
         runoff_delta=fx['runoff_delta'],
         curve_df=fx['curve_df'],
@@ -137,9 +141,10 @@ def test_build_export_workbook_bytes_contains_expected_sheets() -> None:
 
     delta = pd.read_excel(BytesIO(data), sheet_name='Scenario_Matrix_Delta')
     absolute = pd.read_excel(BytesIO(data), sheet_name='Scenario_Matrix_Absolute')
-    assert delta.columns.tolist() == ['Scenario', 'Y1 Delta', 'Y2 Delta', 'Y3 Delta', 'Y4 Delta', 'Y5 Delta', '5Y Cumulative Delta']
-    assert absolute.columns.tolist() == ['Scenario', 'Y1 Absolute', 'Y2 Absolute', 'Y3 Absolute', 'Y4 Absolute', 'Y5 Absolute', '5Y Cumulative Absolute']
+    assert delta.columns.tolist() == ['Layer', 'Scenario', 'Y1 Delta', 'Y2 Delta', 'Y3 Delta', 'Y4 Delta', 'Y5 Delta', '5Y Cumulative Delta']
+    assert absolute.columns.tolist() == ['Layer', 'Scenario', 'Y1 Absolute', 'Y2 Absolute', 'Y3 Absolute', 'Y4 Absolute', 'Y5 Absolute', '5Y Cumulative Absolute']
     assert 'BaseCase' in absolute['Scenario'].astype(str).tolist()
+    assert set(delta['Layer'].astype(str).tolist()) == {'Internal', 'External', 'Net'}
 
 
 def test_build_export_context_accepts_lowercase_metric_index_name() -> None:
@@ -155,14 +160,45 @@ def test_build_export_context_accepts_lowercase_metric_index_name() -> None:
         growth_monthly_value=0.0,
         scenario_payload_json='[]',
         active_ids_json='[]',
-        overview_metrics=metrics,
-        overview_delta_kpis={},
-        yearly_summary=pd.DataFrame(),
-        monthly_base=pd.DataFrame(),
-        monthly_scenarios=pd.DataFrame(),
+        overview_metrics_by_layer={'Internal': metrics},
+        overview_delta_kpis_by_layer={'Internal': {}},
+        yearly_summary_by_layer={'Internal': pd.DataFrame()},
+        monthly_base_by_layer={'Internal': pd.DataFrame()},
+        monthly_scenarios_by_layer={'Internal': pd.DataFrame()},
         calendar_runoff=fx['calendar_runoff'],
         runoff_delta=fx['runoff_delta'],
         curve_df=fx['curve_df'],
     )
     out = pd.DataFrame(ctx['overview_metrics'])
     assert 'Metric' in out.columns
+    assert 'Layer' in out.columns
+
+
+def test_build_export_context_includes_external_metadata() -> None:
+    fx = _fixtures()
+    ctx = build_export_context(
+        path='Input.xlsx',
+        product='Savings',
+        t1=fx['t1'],
+        t2=fx['t2'],
+        growth_mode='constant',
+        growth_monthly_value=0.0,
+        scenario_payload_json='[]',
+        active_ids_json='[]',
+        overview_metrics_by_layer={'External': fx['overview_metrics']},
+        overview_delta_kpis_by_layer={'External': {}},
+        yearly_summary_by_layer={'External': fx['yearly_summary']},
+        monthly_base_by_layer={'External': fx['monthly_base']},
+        monthly_scenarios_by_layer={'External': fx['monthly_scenarios']},
+        additional_metadata={
+            'External Volume Source': 'mirror_internal_absolute',
+            'External Model Types': 'daily_due_savings',
+            'Daily Due Savings Settings': '{"daily_due_savings":{"initial_client_rate":0.01}}',
+        },
+        calendar_runoff=fx['calendar_runoff'],
+        runoff_delta=fx['runoff_delta'],
+        curve_df=fx['curve_df'],
+    )
+    metadata = pd.DataFrame(ctx['summary_metadata'])
+    assert 'External Volume Source' in metadata['Field'].astype(str).tolist()
+    assert 'External Model Types' in metadata['Field'].astype(str).tolist()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -13,13 +14,22 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd
 import streamlit as st
 
+from src.calculations.external_models import (
+    DEFAULT_DAILY_DUE_SAVINGS_SETTINGS,
+    EXTERNAL_MODEL_KEY_DAILY_DUE_SAVINGS,
+    available_external_model_types,
+    compute_external_monthly_snapshot,
+    filter_external_profile_by_product,
+    normalize_external_profile,
+    simulate_external_portfolio,
+)
 from src.calculations.nii import (
     accrued_interest_to_date,
     active_deals_snapshot,
     compare_month_ends,
     compute_monthly_realized_nii,
 )
-from src.calculations.rate_scenarios import normalize_scenarios_df, simulate_rate_scenarios
+from src.calculations.rate_scenarios import normalize_scenarios_df, simulate_rate_scenarios, summarize_yearly_delta
 from src.calculations.refill_growth import (
     compute_refill_growth_components_anchor_safe,
     growth_outstanding_profile,
@@ -57,7 +67,7 @@ from src.dashboard.scenario_store import (
     save_scenario_store,
     validate_custom_scenario,
 )
-from src.data.loader import load_input_workbook
+from src.data.loader import load_input_workbook, load_input_workbook_with_external
 from src.utils.date_utils import month_end_sequence, previous_calendar_month_window
 
 DEFAULT_INPUT_PATH = PROJECT_ROOT / 'Input.xlsx'
@@ -66,6 +76,11 @@ DEFAULT_INPUT_PATH = PROJECT_ROOT / 'Input.xlsx'
 @st.cache_data
 def _load(path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     return load_input_workbook(path)
+
+
+@st.cache_data
+def _load_with_external(path: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    return load_input_workbook_with_external(path)
 
 
 def _sanitize_for_json(value):
@@ -92,6 +107,32 @@ def _serialize_scenarios_for_cache(scenarios_df: pd.DataFrame) -> str:
     return json.dumps(safe_records, sort_keys=True)
 
 
+def _product_slug(product: str | None) -> str:
+    return re.sub(r'[^A-Za-z0-9_-]+', '_', str(product or 'product')).strip('_') or 'product'
+
+
+def _external_model_settings_for_product(product: str, external_df: pd.DataFrame) -> dict[str, dict[str, float]]:
+    settings: dict[str, dict[str, float]] = {}
+    if external_df is None or external_df.empty:
+        return settings
+    if external_df['external_product_type'].astype(str).str.lower().eq(EXTERNAL_MODEL_KEY_DAILY_DUE_SAVINGS).any():
+        slug = _product_slug(product)
+        values = dict(DEFAULT_DAILY_DUE_SAVINGS_SETTINGS)
+        for param, default in DEFAULT_DAILY_DUE_SAVINGS_SETTINGS.items():
+            state_key = f'external_settings_{slug}_{param}'
+            current = st.session_state.get(state_key, default)
+            try:
+                values[param] = float(current)
+            except Exception:
+                values[param] = float(default)
+        settings[EXTERNAL_MODEL_KEY_DAILY_DUE_SAVINGS] = values
+    return settings
+
+
+def _serialize_external_settings(settings: dict[str, dict[str, float]]) -> str:
+    return json.dumps(_sanitize_for_json(settings), sort_keys=True)
+
+
 def _normalize_products(deals_df: pd.DataFrame) -> pd.DataFrame:
     out = deals_df.copy()
     if 'product' not in out.columns:
@@ -109,11 +150,206 @@ def _available_products(deals_df: pd.DataFrame) -> list[str]:
     return sorted(set(products))
 
 
+def _available_external_products(external_df: pd.DataFrame) -> list[str]:
+    normalized = normalize_external_profile(external_df)
+    if normalized.empty:
+        return []
+    products = normalized['product'].dropna().astype(str).tolist()
+    return sorted(set(products))
+
+
+def _available_products_combined(deals_df: pd.DataFrame, external_df: pd.DataFrame) -> list[str]:
+    products = set(_available_products(deals_df))
+    products.update(_available_external_products(external_df))
+    return sorted(products) if products else ['Default']
+
+
 def _filter_deals_by_product(deals_df: pd.DataFrame, product: str | None) -> pd.DataFrame:
     normalized = _normalize_products(deals_df)
     if product is None:
         return normalized
     return normalized[normalized['product'] == str(product)].copy()
+
+
+def _available_month_ends_combined(
+    deals_df: pd.DataFrame,
+    external_df: pd.DataFrame,
+    product: str | None,
+) -> list[pd.Timestamp]:
+    month_ends: set[pd.Timestamp] = set(_available_month_ends(_filter_deals_by_product(deals_df, product)))
+    external_filtered = filter_external_profile_by_product(external_df, product)
+    if not external_filtered.empty:
+        month_ends.update(pd.to_datetime(external_filtered['calendar_month_end']).tolist())
+    return sorted(month_ends)
+
+
+def _zero_metric_row() -> pd.Series:
+    return pd.Series(
+        {
+            'total_active_notional': 0.0,
+            'weighted_avg_coupon': 0.0,
+            'interest_paid_eur': 0.0,
+            'active_deal_count': 0,
+        }
+    )
+
+
+def _row_for_month(monthly_df: pd.DataFrame | None, month_end: pd.Timestamp) -> pd.Series:
+    if monthly_df is None or monthly_df.empty:
+        return _zero_metric_row()
+    work = monthly_df.copy()
+    month_col = 'month_end' if 'month_end' in work.columns else 'calendar_month_end'
+    if month_col not in work.columns:
+        return _zero_metric_row()
+    work[month_col] = pd.to_datetime(work[month_col]) + pd.offsets.MonthEnd(0)
+    target = pd.Timestamp(month_end) + pd.offsets.MonthEnd(0)
+    row = work[work[month_col] == target]
+    if row.empty:
+        return _zero_metric_row()
+    out = row.iloc[0]
+    for col, default in _zero_metric_row().items():
+        if col not in out.index or pd.isna(out[col]):
+            out[col] = default
+    return out
+
+
+def _combine_metric_rows(row_a: pd.Series, row_b: pd.Series) -> pd.Series:
+    notional_a = float(row_a.get('total_active_notional', 0.0))
+    notional_b = float(row_b.get('total_active_notional', 0.0))
+    abs_total = abs(notional_a) + abs(notional_b)
+    weighted_avg_coupon = 0.0
+    if abs_total > 1e-12:
+        weighted_avg_coupon = (
+            (float(row_a.get('weighted_avg_coupon', 0.0)) * abs(notional_a))
+            + (float(row_b.get('weighted_avg_coupon', 0.0)) * abs(notional_b))
+        ) / abs_total
+    return pd.Series(
+        {
+            'total_active_notional': notional_a + notional_b,
+            'weighted_avg_coupon': weighted_avg_coupon,
+            'interest_paid_eur': float(row_a.get('interest_paid_eur', 0.0)) + float(row_b.get('interest_paid_eur', 0.0)),
+            'active_deal_count': int(float(row_a.get('active_deal_count', 0))) + int(float(row_b.get('active_deal_count', 0))),
+        }
+    )
+
+
+def _overview_delta_kpis(row_t1: pd.Series, row_t2: pd.Series, accrued_delta: float) -> dict[str, float]:
+    return {
+        'Realized NII Delta (EUR)': float(row_t2.get('interest_paid_eur', 0.0)) - float(row_t1.get('interest_paid_eur', 0.0)),
+        'Active Deals Delta': float(row_t2.get('active_deal_count', 0.0)) - float(row_t1.get('active_deal_count', 0.0)),
+        'Accrued Interest Delta (EUR)': float(accrued_delta),
+        'Volume Delta (EUR)': float(row_t2.get('total_active_notional', 0.0)) - float(row_t1.get('total_active_notional', 0.0)),
+        'Coupon Delta (pp)': (float(row_t2.get('weighted_avg_coupon', 0.0)) - float(row_t1.get('weighted_avg_coupon', 0.0))) * 100.0,
+    }
+
+
+def _layer_summary_row(layer: str, row_t1: pd.Series, row_t2: pd.Series) -> dict[str, float | str]:
+    return {
+        'Layer': layer,
+        'T1 Notional (EUR)': float(row_t1.get('total_active_notional', 0.0)),
+        'T2 Notional (EUR)': float(row_t2.get('total_active_notional', 0.0)),
+        'Delta Notional (EUR)': float(row_t2.get('total_active_notional', 0.0)) - float(row_t1.get('total_active_notional', 0.0)),
+        'T2 Interest (EUR)': float(row_t2.get('interest_paid_eur', 0.0)),
+        'T2 Weighted Rate (pp)': float(row_t2.get('weighted_avg_coupon', 0.0)) * 100.0,
+    }
+
+
+def _combine_monthly_base_for_net(internal_base: pd.DataFrame, external_base: pd.DataFrame) -> pd.DataFrame:
+    base_cols = ['month_idx', 'calendar_month_end', 'base_total_interest']
+    ib = internal_base.copy() if internal_base is not None else pd.DataFrame(columns=base_cols)
+    eb = external_base.copy() if external_base is not None else pd.DataFrame(columns=base_cols)
+    for df in [ib, eb]:
+        if 'month_idx' not in df.columns:
+            df['month_idx'] = []
+        if 'calendar_month_end' not in df.columns:
+            df['calendar_month_end'] = []
+        if 'base_total_interest' not in df.columns:
+            df['base_total_interest'] = 0.0
+    merged = ib[base_cols].merge(
+        eb[base_cols],
+        on=['month_idx', 'calendar_month_end'],
+        how='outer',
+        suffixes=('_internal', '_external'),
+    ).fillna(0.0)
+    merged['base_total_interest'] = merged['base_total_interest_internal'] + merged['base_total_interest_external']
+    return merged[['month_idx', 'calendar_month_end', 'base_total_interest']].sort_values('calendar_month_end').reset_index(drop=True)
+
+
+def _combine_monthly_scenarios_for_net(
+    internal_scenarios: pd.DataFrame,
+    external_scenarios: pd.DataFrame,
+) -> pd.DataFrame:
+    scenario_cols = ['scenario_id', 'scenario_label', 'month_idx', 'calendar_month_end']
+    int_cols = scenario_cols + ['shock_bps', 'base_total_interest', 'shocked_total_interest', 'delta_vs_base']
+    ext_cols = scenario_cols + ['base_total_interest', 'shocked_total_interest', 'delta_vs_base']
+    ins = internal_scenarios.copy() if internal_scenarios is not None else pd.DataFrame(columns=int_cols)
+    exs = external_scenarios.copy() if external_scenarios is not None else pd.DataFrame(columns=ext_cols)
+    for col in int_cols:
+        if col not in ins.columns:
+            ins[col] = 0.0 if col not in scenario_cols else None
+    for col in ext_cols:
+        if col not in exs.columns:
+            exs[col] = 0.0 if col not in scenario_cols else None
+    merged = ins[int_cols].merge(
+        exs[ext_cols],
+        on=scenario_cols,
+        how='outer',
+        suffixes=('_internal', '_external'),
+    ).fillna(0.0)
+    merged['shock_bps'] = merged['shock_bps']
+    merged['base_total_interest'] = merged['base_total_interest_internal'] + merged['base_total_interest_external']
+    merged['shocked_total_interest'] = merged['shocked_total_interest_internal'] + merged['shocked_total_interest_external']
+    merged['delta_vs_base'] = merged['delta_vs_base_internal'] + merged['delta_vs_base_external']
+    merged = merged.sort_values(['scenario_id', 'calendar_month_end']).reset_index(drop=True)
+    merged['cumulative_delta'] = merged.groupby('scenario_id')['delta_vs_base'].cumsum()
+    return merged[
+        [
+            'scenario_id',
+            'scenario_label',
+            'month_idx',
+            'calendar_month_end',
+            'shock_bps',
+            'base_total_interest',
+            'shocked_total_interest',
+            'delta_vs_base',
+            'cumulative_delta',
+        ]
+    ]
+
+
+def _render_external_model_settings(product: str, external_df: pd.DataFrame) -> dict[str, dict[str, float]]:
+    settings = _external_model_settings_for_product(product, external_df)
+    if external_df is None or external_df.empty:
+        return settings
+    if not external_df['external_product_type'].astype(str).str.lower().eq(EXTERNAL_MODEL_KEY_DAILY_DUE_SAVINGS).any():
+        return settings
+
+    slug = _product_slug(product)
+    st.caption('External Model Settings')
+    with st.expander(f'Daily Due Savings Settings ({product})', expanded=False):
+        c1, c2, c3, c4, c5 = st.columns(5)
+        controls = [
+            ('initial_client_rate', 'Initial Client Rate', 0.0001, c1),
+            ('mean_reversion', 'Mean Reversion', 0.0001, c2),
+            ('a', 'a', 0.0001, c3),
+            ('b', 'b', 0.0001, c4),
+            ('c', 'c', 0.0001, c5),
+        ]
+        for param, label, step, col in controls:
+            key = f'external_settings_{slug}_{param}'
+            default = float(DEFAULT_DAILY_DUE_SAVINGS_SETTINGS[param])
+            current = st.session_state.get(key, default)
+            with col:
+                st.number_input(
+                    label,
+                    min_value=-1.0,
+                    max_value=2.0,
+                    value=float(current),
+                    step=float(step),
+                    format='%.4f',
+                    key=key,
+                )
+    return _external_model_settings_for_product(product, external_df)
 
 
 @st.cache_data
@@ -241,7 +477,7 @@ def _cached_rate_scenario_projection(
         scenario_df = pd.DataFrame()
 
     try:
-        return simulate_rate_scenarios(
+        result = simulate_rate_scenarios(
             month_ends=pd.Series(projection_months),
             existing_contractual_interest=existing_contractual_interest,
             refill_notional=refill_required,
@@ -251,6 +487,18 @@ def _cached_rate_scenario_projection(
             anchor_date=t2_me,
             scenarios=scenario_df if not scenario_df.empty else None,
         )
+        monthly_base = result.get('monthly_base', pd.DataFrame()).copy()
+        if not monthly_base.empty:
+            monthly_base['existing_projected_notional'] = cumulative_notional.to_numpy(dtype=float)
+            monthly_base['refill_flow_notional'] = refill_required.to_numpy(dtype=float)
+            monthly_base['growth_outstanding_notional'] = growth_outstanding.to_numpy(dtype=float)
+            monthly_base['projected_total_notional'] = (
+                cumulative_notional.to_numpy(dtype=float)
+                + refill_required.to_numpy(dtype=float)
+                + growth_outstanding.to_numpy(dtype=float)
+            )
+            result['monthly_base'] = monthly_base
+        return result
     except Exception as exc:
         return {
             'error': f'Failed to compute rate scenarios: {exc}',
@@ -260,6 +508,166 @@ def _cached_rate_scenario_projection(
             'yearly_summary': pd.DataFrame(),
             'curve_points': pd.DataFrame(),
         }
+
+
+def _empty_internal_rate_scenario_projection(
+    *,
+    curve_df: pd.DataFrame,
+    anchor_date: pd.Timestamp,
+    scenarios_payload_json: str,
+    active_ids_json: str,
+    horizon_months: int,
+) -> dict[str, pd.DataFrame]:
+    """Return zeroed internal scenario outputs when no internal deals exist for the selection."""
+    scenario_df = pd.DataFrame()
+    try:
+        scenario_records = json.loads(str(scenarios_payload_json or '[]'))
+        if isinstance(scenario_records, list) and scenario_records:
+            scenario_df = normalize_scenarios_df(pd.DataFrame(scenario_records))
+        active_ids = json.loads(str(active_ids_json or '[]'))
+        if isinstance(active_ids, list) and not scenario_df.empty:
+            active_set = {str(x) for x in active_ids}
+            scenario_df = scenario_df[scenario_df['scenario_id'].astype(str).isin(active_set)].copy()
+    except Exception:
+        scenario_df = pd.DataFrame()
+
+    horizon = int(max(1, min(int(horizon_months), 240)))
+    month_ends = pd.DatetimeIndex([pd.Timestamp(anchor_date) + pd.offsets.MonthEnd(k) for k in range(horizon)])
+    zeros = pd.Series(0.0, index=range(horizon), dtype=float)
+    tenor_months = pd.Series(range(1, horizon + 1), dtype=int)
+    result = simulate_rate_scenarios(
+        month_ends=pd.Series(month_ends),
+        existing_contractual_interest=zeros,
+        refill_notional=zeros,
+        growth_notional=zeros,
+        tenor_months=tenor_months,
+        curve_df=curve_df,
+        anchor_date=pd.Timestamp(anchor_date),
+        scenarios=scenario_df if not scenario_df.empty else None,
+    )
+    monthly_base = result.get('monthly_base', pd.DataFrame()).copy()
+    if not monthly_base.empty:
+        monthly_base['existing_projected_notional'] = 0.0
+        monthly_base['refill_flow_notional'] = 0.0
+        monthly_base['growth_outstanding_notional'] = 0.0
+        monthly_base['projected_total_notional'] = 0.0
+        result['monthly_base'] = monthly_base
+    return result
+
+
+@st.cache_data
+def _cached_combined_nii_projection(
+    path: str,
+    t1: pd.Timestamp,
+    t2: pd.Timestamp,
+    product: str,
+    basis: str,
+    growth_mode: str,
+    growth_monthly_value: float,
+    scenarios_payload_json: str,
+    active_ids_json: str,
+    external_settings_json: str,
+    horizon_months: int = 60,
+) -> dict[str, pd.DataFrame | str]:
+    deals_df_all, curve_df, external_df_all = _load_with_external(path)
+    deals_df = _filter_deals_by_product(deals_df_all, product)
+    external_df = filter_external_profile_by_product(external_df_all, product)
+
+    if deals_df.empty:
+        internal_result = _empty_internal_rate_scenario_projection(
+            curve_df=curve_df,
+            anchor_date=t2,
+            scenarios_payload_json=scenarios_payload_json,
+            active_ids_json=active_ids_json,
+            horizon_months=horizon_months,
+        )
+    else:
+        internal_result = _cached_rate_scenario_projection(
+            path,
+            t1,
+            t2,
+            product,
+            basis,
+            growth_mode,
+            growth_monthly_value,
+            scenarios_payload_json,
+            active_ids_json,
+            horizon_months,
+        )
+
+    internal_error = str(internal_result.get('error', '')) if isinstance(internal_result, dict) else ''
+    if internal_error:
+        return {
+            'error': internal_error,
+            'scenarios': pd.DataFrame(),
+            'curve_points': pd.DataFrame(),
+            'tenor_paths': pd.DataFrame(),
+            'internal_base': pd.DataFrame(),
+            'internal_scenarios': pd.DataFrame(),
+            'internal_yearly_summary': pd.DataFrame(),
+            'external_base': pd.DataFrame(),
+            'external_scenarios': pd.DataFrame(),
+            'external_yearly_summary': pd.DataFrame(),
+            'net_base': pd.DataFrame(),
+            'net_scenarios': pd.DataFrame(),
+            'net_yearly_summary': pd.DataFrame(),
+        }
+
+    scenarios_df = internal_result.get('scenarios', pd.DataFrame())
+    try:
+        external_settings = json.loads(str(external_settings_json or '{}'))
+        if not isinstance(external_settings, dict):
+            external_settings = {}
+    except Exception:
+        external_settings = {}
+
+    internal_base = internal_result.get('monthly_base', pd.DataFrame())
+    internal_scenarios = internal_result.get('monthly_scenarios', pd.DataFrame())
+    projection_months = (
+        internal_base['calendar_month_end']
+        if not internal_base.empty and 'calendar_month_end' in internal_base.columns
+        else pd.Series([pd.Timestamp(t2) + pd.offsets.MonthEnd(k) for k in range(int(max(1, horizon_months)))])
+    )
+    mirrored_notional = (
+        internal_base['projected_total_notional']
+        if not internal_base.empty and 'projected_total_notional' in internal_base.columns
+        else pd.Series(0.0, index=range(len(projection_months)), dtype=float)
+    )
+    external_result = simulate_external_portfolio(
+        profile_df=external_df,
+        month_ends=projection_months,
+        mirrored_notional=mirrored_notional,
+        curve_df=curve_df,
+        anchor_date=t2,
+        scenarios=scenarios_df if not scenarios_df.empty else None,
+        settings_by_model=external_settings,
+    )
+    external_base = external_result.get('monthly_base', pd.DataFrame())
+    external_scenarios = external_result.get('monthly_scenarios', pd.DataFrame())
+    net_base = _combine_monthly_base_for_net(internal_base, external_base)
+    net_scenarios = _combine_monthly_scenarios_for_net(internal_scenarios, external_scenarios)
+    net_yearly_summary = summarize_yearly_delta(
+        net_scenarios,
+        scenarios=scenarios_df if not scenarios_df.empty else None,
+        years=5,
+    )
+
+    return {
+        'error': '',
+        'scenarios': scenarios_df,
+        'curve_points': internal_result.get('curve_points', pd.DataFrame()),
+        'tenor_paths': internal_result.get('tenor_paths', pd.DataFrame()),
+        'internal_base': internal_base,
+        'internal_scenarios': internal_scenarios,
+        'internal_yearly_summary': internal_result.get('yearly_summary', pd.DataFrame()),
+        'external_base': external_base,
+        'external_scenarios': external_scenarios,
+        'external_yearly_summary': external_result.get('yearly_summary', pd.DataFrame()),
+        'external_metadata': external_result.get('metadata', {}),
+        'net_base': net_base,
+        'net_scenarios': net_scenarios,
+        'net_yearly_summary': net_yearly_summary,
+    }
 
 
 def _available_month_ends(deals_df: pd.DataFrame) -> list[pd.Timestamp]:
@@ -530,14 +938,14 @@ def main() -> None:
 
     current_path = st.session_state.get('global_input_path', 'Input.xlsx')
     try:
-        deals_probe, _ = _load(current_path)
-        products_probe = _available_products(deals_probe)
+        deals_probe, _, external_probe = _load_with_external(current_path)
+        products_probe = _available_products_combined(deals_probe, external_probe)
         product_probe = coerce_option(
             st.session_state.get('global_product', products_probe[0] if products_probe else 'Default'),
             products_probe if products_probe else ['Default'],
             products_probe[0] if products_probe else 'Default',
         )
-        month_ends = _available_month_ends(_filter_deals_by_product(deals_probe, product_probe))
+        month_ends = _available_month_ends_combined(deals_probe, external_probe, product_probe)
     except Exception:
         products_probe = []
         product_probe = None
@@ -552,11 +960,11 @@ def main() -> None:
         st.rerun()
 
     try:
-        deals_df_all, curve_df = _load(input_path)
+        deals_df_all, curve_df, external_df_all = _load_with_external(input_path)
     except Exception as exc:
         st.error(f'Failed to load workbook at `{input_path}`: {exc}')
         st.stop()
-    products = _available_products(deals_df_all)
+    products = _available_products_combined(deals_df_all, external_df_all)
     if not products:
         st.error('No products available from input data.')
         st.stop()
@@ -569,6 +977,8 @@ def main() -> None:
         st.session_state['global_product'] = selected_product
         st.rerun()
     deals_df = _filter_deals_by_product(deals_df_all, selected_product)
+    external_df = filter_external_profile_by_product(external_df_all, selected_product)
+    has_internal_data = not deals_df.empty
 
     st.session_state['runoff_has_refill_views'] = True
 
@@ -597,7 +1007,7 @@ def main() -> None:
     }
     scenario_id_to_label['__base__'] = 'Base Case (No Shock)'
 
-    month_ends = _available_month_ends(deals_df)
+    month_ends = _available_month_ends_combined(deals_df_all, external_df_all, selected_product)
     if not month_ends:
         st.error(f'No month-end dates available for selected product `{selected_product}`.')
         return
@@ -618,12 +1028,19 @@ def main() -> None:
     )
 
     prev_start, prev_end = previous_calendar_month_window(t1)
-    realized_nii_t1 = compute_monthly_realized_nii(deals_df, prev_start, prev_end)
-    active_t1 = active_deals_snapshot(deals_df, t1)
-    active_count_t1 = int(len(active_t1))
-    accrued_t1 = accrued_interest_to_date(deals_df, t1)
-    monthly_t1 = _cached_monthly_buckets(input_path, t1, selected_product)
-    row_t1 = monthly_t1[monthly_t1['month_end'] == t1].iloc[0]
+    if has_internal_data:
+        realized_nii_t1 = compute_monthly_realized_nii(deals_df, prev_start, prev_end)
+        active_t1 = active_deals_snapshot(deals_df, t1)
+        active_count_t1 = int(len(active_t1))
+        accrued_t1 = accrued_interest_to_date(deals_df, t1)
+        monthly_t1 = _cached_monthly_buckets(input_path, t1, selected_product)
+        row_t1 = _row_for_month(monthly_t1, t1)
+    else:
+        realized_nii_t1 = 0.0
+        active_count_t1 = 0
+        accrued_t1 = 0.0
+        monthly_t1 = pd.DataFrame(columns=['month_end', 'total_active_notional', 'weighted_avg_coupon', 'interest_paid_eur', 'active_deal_count'])
+        row_t1 = _zero_metric_row()
 
     if t2 is None:
         if selected_section == 'Overview':
@@ -638,22 +1055,86 @@ def main() -> None:
         return
 
     prev_start_t2, prev_end_t2 = previous_calendar_month_window(t2)
-    realized_nii_t2 = compute_monthly_realized_nii(deals_df, prev_start_t2, prev_end_t2)
-    active_t2 = active_deals_snapshot(deals_df, t2)
-    active_count_t2 = int(len(active_t2))
-    accrued_t2 = accrued_interest_to_date(deals_df, t2)
-    monthly_t2 = _cached_monthly_buckets(input_path, t2, selected_product)
-    row_t2 = monthly_t2[monthly_t2['month_end'] == t2].iloc[0]
+    if has_internal_data:
+        realized_nii_t2 = compute_monthly_realized_nii(deals_df, prev_start_t2, prev_end_t2)
+        active_t2 = active_deals_snapshot(deals_df, t2)
+        active_count_t2 = int(len(active_t2))
+        accrued_t2 = accrued_interest_to_date(deals_df, t2)
+        monthly_t2 = _cached_monthly_buckets(input_path, t2, selected_product)
+        row_t2 = _row_for_month(monthly_t2, t2)
+    else:
+        realized_nii_t2 = 0.0
+        active_count_t2 = 0
+        accrued_t2 = 0.0
+        monthly_t2 = pd.DataFrame(columns=['month_end', 'total_active_notional', 'weighted_avg_coupon', 'interest_paid_eur', 'active_deal_count'])
+        row_t2 = _zero_metric_row()
 
     if selected_section == 'Overview':
-        overview_delta_kpis = {
-            'Realized NII Delta (EUR)': float(realized_nii_t2 - realized_nii_t1),
-            'Active Deals Delta': float(active_count_t2 - active_count_t1),
-            'Accrued Interest Delta (EUR)': float(accrued_t2 - accrued_t1),
-            'Volume Delta (EUR)': float(row_t2['total_active_notional']) - float(row_t1['total_active_notional']),
-            'Coupon Delta (pp)': (float(row_t2['weighted_avg_coupon']) - float(row_t1['weighted_avg_coupon'])) * 100.0,
+        external_settings = _render_external_model_settings(selected_product, external_df)
+        external_settings_json = _serialize_external_settings(external_settings)
+        if has_internal_data and not monthly_t2.empty:
+            internal_history = monthly_t2.copy()
+            history_month_ends = internal_history['month_end']
+            history_notional = internal_history['total_active_notional']
+        else:
+            history_month_ends = pd.Series([pd.Timestamp(t1), pd.Timestamp(t2)])
+            history_notional = pd.Series(0.0, index=range(len(history_month_ends)), dtype=float)
+        external_monthly = compute_external_monthly_snapshot(
+            external_df,
+            month_ends=history_month_ends,
+            mirrored_notional=history_notional,
+            curve_df=curve_df,
+            anchor_date=t2,
+            settings_by_model=external_settings,
+        )
+        external_row_t1 = _row_for_month(external_monthly, t1)
+        external_row_t2 = _row_for_month(external_monthly, t2)
+        net_row_t1 = _combine_metric_rows(row_t1, external_row_t1)
+        net_row_t2 = _combine_metric_rows(row_t2, external_row_t2)
+
+        metrics_by_layer = {
+            'Internal': _dual_view_metric_table(row_t1, row_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}'),
+            'External': _dual_view_metric_table(external_row_t1, external_row_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}'),
+            'Net': _dual_view_metric_table(net_row_t1, net_row_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}'),
         }
-        st.subheader('Monthly View Delta Summary (T2 - T1)')
+        delta_kpis_by_layer = {
+            'Internal': _overview_delta_kpis(row_t1, row_t2, float(accrued_t2 - accrued_t1)),
+            'External': _overview_delta_kpis(external_row_t1, external_row_t2, 0.0),
+            'Net': _overview_delta_kpis(net_row_t1, net_row_t2, float(accrued_t2 - accrued_t1)),
+        }
+        layer_summary = pd.DataFrame(
+            [
+                _layer_summary_row('Internal', row_t1, row_t2),
+                _layer_summary_row('External', external_row_t1, external_row_t2),
+                _layer_summary_row('Net', net_row_t1, net_row_t2),
+            ]
+        )
+
+        st.subheader('Monthly View Layer Summary')
+        st.dataframe(style_numeric_table(layer_summary.set_index('Layer')), width='stretch')
+
+        layer_options = ['Internal', 'External', 'Net']
+        selected_overview_layer = coerce_option(
+            st.session_state.get('overview_nii_layer', 'Net'),
+            layer_options,
+            'Net',
+        )
+        selected_overview_layer = st.radio(
+            'Overview layer',
+            options=layer_options,
+            index=layer_options.index(selected_overview_layer),
+            horizontal=True,
+            key='overview_nii_layer',
+        )
+        overview_delta_kpis = delta_kpis_by_layer[selected_overview_layer]
+        metrics_table = metrics_by_layer[selected_overview_layer]
+
+        if selected_overview_layer == 'External':
+            st.caption('External models do not carry a separate accrued-interest measure in v1; accrued delta is shown as 0.')
+        if not has_internal_data and not external_df.empty:
+            st.warning('External volume mirroring requires an internal path. Current selection has no internal deals, so external and net volumes are shown as zero.')
+
+        st.subheader(f'Monthly View Delta Summary ({selected_overview_layer}, T2 - T1)')
         d1, d2, d3, d4, d5 = st.columns(5)
         d1.metric('Realized NII Delta (EUR)', f'{overview_delta_kpis["Realized NII Delta (EUR)"]:,.2f}')
         d2.metric('Active Deals Delta', f'{int(overview_delta_kpis["Active Deals Delta"]):,d}')
@@ -667,8 +1148,7 @@ def main() -> None:
             f'{overview_delta_kpis["Coupon Delta (pp)"]:.4f}',
         )
 
-        st.subheader('Monthly View Metrics (T1 vs T2)')
-        metrics_table = _dual_view_metric_table(row_t1, row_t2, label_t1=f'T1 {t1.date()}', label_t2=f'T2 {t2.date()}')
+        st.subheader(f'Monthly View Metrics ({selected_overview_layer}, T1 vs T2)')
         st.dataframe(style_numeric_table(metrics_table), width='stretch')
 
         st.subheader('Rate Scenario Analysis (5Y, vs Base Case)')
@@ -681,7 +1161,10 @@ def main() -> None:
         yearly_summary = pd.DataFrame()
         curve_points = pd.DataFrame()
         tenor_paths = pd.DataFrame()
-        scenario_result = _cached_rate_scenario_projection(
+        monthly_base_by_layer = {'Internal': pd.DataFrame(), 'External': pd.DataFrame(), 'Net': pd.DataFrame()}
+        monthly_scenarios_by_layer = {'Internal': pd.DataFrame(), 'External': pd.DataFrame(), 'Net': pd.DataFrame()}
+        yearly_summary_by_layer = {'Internal': pd.DataFrame(), 'External': pd.DataFrame(), 'Net': pd.DataFrame()}
+        scenario_result = _cached_combined_nii_projection(
             input_path,
             t1,
             t2,
@@ -691,6 +1174,7 @@ def main() -> None:
             float(ui.get('growth_monthly_value', 0.0)),
             scenario_payload_json,
             active_ids_json,
+            external_settings_json,
             60,
         )
         scenario_error = str(scenario_result.get('error', '')) if isinstance(scenario_result, dict) else ''
@@ -698,16 +1182,37 @@ def main() -> None:
             st.warning(scenario_error)
         else:
             scenarios_df = scenario_result.get('scenarios', pd.DataFrame())
-            monthly_base = scenario_result.get('monthly_base', pd.DataFrame())
-            monthly_scenarios = scenario_result.get('monthly_scenarios', pd.DataFrame())
-            yearly_summary = scenario_result.get('yearly_summary', pd.DataFrame())
+            monthly_base_by_layer = {
+                'Internal': scenario_result.get('internal_base', pd.DataFrame()),
+                'External': scenario_result.get('external_base', pd.DataFrame()),
+                'Net': scenario_result.get('net_base', pd.DataFrame()),
+            }
+            monthly_scenarios_by_layer = {
+                'Internal': scenario_result.get('internal_scenarios', pd.DataFrame()),
+                'External': scenario_result.get('external_scenarios', pd.DataFrame()),
+                'Net': scenario_result.get('net_scenarios', pd.DataFrame()),
+            }
+            yearly_summary_by_layer = {
+                'Internal': scenario_result.get('internal_yearly_summary', pd.DataFrame()),
+                'External': scenario_result.get('external_yearly_summary', pd.DataFrame()),
+                'Net': scenario_result.get('net_yearly_summary', pd.DataFrame()),
+            }
+            monthly_base = monthly_base_by_layer[selected_overview_layer]
+            monthly_scenarios = monthly_scenarios_by_layer[selected_overview_layer]
+            yearly_summary = yearly_summary_by_layer[selected_overview_layer]
             curve_points = scenario_result.get('curve_points', pd.DataFrame())
             tenor_paths = scenario_result.get('tenor_paths', pd.DataFrame())
+            external_metadata = scenario_result.get('external_metadata', {})
+            model_types = external_metadata.get('model_types', [])
+            if model_types:
+                st.caption(
+                    f'External volume source: mirror_internal_absolute. Active external model(s): {", ".join([str(x) for x in model_types])}.'
+                )
 
             if scenarios_df.empty or monthly_base.empty or monthly_scenarios.empty or yearly_summary.empty:
                 st.info('Rate scenario outputs are currently unavailable for this selection.')
             else:
-                st.caption('Scenario Impact Matrix')
+                st.caption(f'Scenario Impact Matrix ({selected_overview_layer})')
                 matrix_options = ['Delta', 'Absolute']
                 matrix_current = coerce_option(
                     st.session_state.get('overview_rate_matrix_view', matrix_options[0]),
@@ -818,7 +1323,7 @@ def main() -> None:
         export_signature = (
             f'{input_path}|{selected_product}|{pd.Timestamp(t1).date().isoformat()}|'
             f'{pd.Timestamp(t2).date().isoformat()}|{ui.get("growth_mode", "constant")}|'
-            f'{float(ui.get("growth_monthly_value", 0.0))}|{active_ids_json}'
+            f'{float(ui.get("growth_monthly_value", 0.0))}|{active_ids_json}|{external_settings_json}'
         )
         if st.session_state.get('overview_export_signature') != export_signature:
             st.session_state['overview_export_signature'] = export_signature
@@ -830,8 +1335,12 @@ def main() -> None:
             generate_export = st.button('Generate Executive Excel', key='overview_generate_export')
         if generate_export:
             try:
-                runoff_delta_export = _cached_runoff_delta(input_path, t1, t2, selected_product)
-                calendar_runoff_export = _cached_calendar_runoff(input_path, t1, t2, True, selected_product)
+                if has_internal_data:
+                    runoff_delta_export = _cached_runoff_delta(input_path, t1, t2, selected_product)
+                    calendar_runoff_export = _cached_calendar_runoff(input_path, t1, t2, True, selected_product)
+                else:
+                    runoff_delta_export = pd.DataFrame()
+                    calendar_runoff_export = pd.DataFrame({'calendar_month_end': pd.date_range(pd.Timestamp(t2), periods=12, freq='ME')})
                 export_context = build_export_context(
                     path=input_path,
                     product=selected_product,
@@ -841,11 +1350,16 @@ def main() -> None:
                     growth_monthly_value=float(ui.get('growth_monthly_value', 0.0)),
                     scenario_payload_json=scenario_payload_json,
                     active_ids_json=active_ids_json,
-                    overview_metrics=metrics_table,
-                    overview_delta_kpis=overview_delta_kpis,
-                    yearly_summary=yearly_summary,
-                    monthly_base=monthly_base,
-                    monthly_scenarios=monthly_scenarios,
+                    overview_metrics_by_layer=metrics_by_layer,
+                    overview_delta_kpis_by_layer=delta_kpis_by_layer,
+                    yearly_summary_by_layer=yearly_summary_by_layer,
+                    monthly_base_by_layer=monthly_base_by_layer,
+                    monthly_scenarios_by_layer=monthly_scenarios_by_layer,
+                    additional_metadata={
+                        'External Volume Source': 'mirror_internal_absolute',
+                        'External Model Types': ', '.join(available_external_model_types(external_df)),
+                        'Daily Due Savings Settings': json.dumps(_sanitize_for_json(external_settings), sort_keys=True),
+                    },
                     calendar_runoff=calendar_runoff_export,
                     runoff_delta=runoff_delta_export,
                     curve_df=curve_df,
@@ -932,6 +1446,12 @@ def main() -> None:
                     st.rerun()
                 except Exception as exc:
                     st.error(f'Failed to persist active scenario set: {exc}')
+
+    elif not has_internal_data:
+        st.info(
+            f'Selected product `{selected_product}` has no internal replication deals in `Deal_Data`. '
+            'Overview supports external/net analytics, but Daily, Runoff, and Deal Differences remain internal-only in v1.'
+        )
 
     elif selected_section == 'Daily':
         st.caption(

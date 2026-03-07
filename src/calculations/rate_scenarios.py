@@ -285,6 +285,19 @@ def _shock_path_bps_from_spec(
     return (scale * base).astype(float)
 
 
+def shock_path_bps_for_spec(
+    scenario_spec: dict[str, Any],
+    month_idx: pd.Series,
+    tenor_months: pd.Series | float | int,
+) -> pd.Series:
+    """Public wrapper for shock-path generation from normalized scenario specs."""
+    return _shock_path_bps_from_spec(
+        scenario_spec=scenario_spec,
+        month_idx=month_idx,
+        tenor_months=tenor_months,
+    )
+
+
 def shock_path_bps(
     scenario_id: str,
     month_idx: pd.Series,
@@ -480,37 +493,7 @@ def simulate_rate_scenarios(
         )
     )
 
-    yearly = monthly_scenarios.copy()
-    if not yearly.empty:
-        yearly['year_bucket'] = (yearly['month_idx'] // 12) + 1
-        yearly = yearly[yearly['year_bucket'].between(1, 5)].copy()
-        grouped = (
-            yearly.groupby(['scenario_id', 'scenario_label', 'year_bucket'])['delta_vs_base']
-            .sum()
-            .reset_index()
-        )
-        pivot = grouped.pivot_table(
-            index=['scenario_id', 'scenario_label'],
-            columns='year_bucket',
-            values='delta_vs_base',
-            aggfunc='sum',
-            fill_value=0.0,
-        )
-        pivot = pivot.rename(columns={1: 'Y1 Delta', 2: 'Y2 Delta', 3: 'Y3 Delta', 4: 'Y4 Delta', 5: 'Y5 Delta'})
-        for col in ['Y1 Delta', 'Y2 Delta', 'Y3 Delta', 'Y4 Delta', 'Y5 Delta']:
-            if col not in pivot.columns:
-                pivot[col] = 0.0
-        pivot['5Y Cumulative Delta'] = pivot[['Y1 Delta', 'Y2 Delta', 'Y3 Delta', 'Y4 Delta', 'Y5 Delta']].sum(axis=1)
-        yearly_summary = pivot.reset_index()
-        yearly_summary = (
-            sdef[['scenario_id', 'scenario_label']]
-            .merge(yearly_summary, on=['scenario_id', 'scenario_label'], how='left')
-            .fillna(0.0)
-        )
-    else:
-        yearly_summary = sdef[['scenario_id', 'scenario_label']].copy()
-        for col in ['Y1 Delta', 'Y2 Delta', 'Y3 Delta', 'Y4 Delta', 'Y5 Delta', '5Y Cumulative Delta']:
-            yearly_summary[col] = 0.0
+    yearly_summary = summarize_yearly_delta(monthly_scenarios, scenarios=sdef, years=5)
 
     tenor_grid = _tenor_grid(curve_df)
     anchor = pd.Timestamp(anchor_date) + pd.offsets.MonthEnd(0)
@@ -607,3 +590,58 @@ def simulate_rate_scenarios(
         'curve_points': curve_points.reset_index(drop=True),
         'tenor_paths': tenor_paths.reset_index(drop=True),
     }
+
+
+def summarize_yearly_delta(
+    monthly_scenarios: pd.DataFrame,
+    *,
+    scenarios: pd.DataFrame | None = None,
+    years: int = 5,
+) -> pd.DataFrame:
+    """Aggregate scenario monthly deltas into Y1..Yn summary."""
+    year_count = int(max(1, years))
+    expected = [f'Y{i} Delta' for i in range(1, year_count + 1)] + [f'{year_count}Y Cumulative Delta']
+    sdef = normalize_scenarios_df(scenarios if scenarios is not None else None)
+    if monthly_scenarios is None or monthly_scenarios.empty:
+        out = sdef[['scenario_id', 'scenario_label']].copy()
+        for col in expected:
+            out[col] = 0.0
+        return out
+
+    yearly = monthly_scenarios.copy()
+    needed = {'scenario_id', 'scenario_label', 'month_idx', 'delta_vs_base'}
+    if not needed.issubset(set(yearly.columns)):
+        out = sdef[['scenario_id', 'scenario_label']].copy()
+        for col in expected:
+            out[col] = 0.0
+        return out
+
+    yearly['year_bucket'] = (pd.to_numeric(yearly['month_idx'], errors='coerce').fillna(-1).astype(int) // 12) + 1
+    yearly = yearly[yearly['year_bucket'].between(1, year_count)].copy()
+    grouped = (
+        yearly.groupby(['scenario_id', 'scenario_label', 'year_bucket'])['delta_vs_base']
+        .sum()
+        .reset_index()
+    )
+    if grouped.empty:
+        out = sdef[['scenario_id', 'scenario_label']].copy()
+        for col in expected:
+            out[col] = 0.0
+        return out
+
+    pivot = grouped.pivot_table(
+        index=['scenario_id', 'scenario_label'],
+        columns='year_bucket',
+        values='delta_vs_base',
+        aggfunc='sum',
+        fill_value=0.0,
+    )
+    pivot = pivot.rename(columns={i: f'Y{i} Delta' for i in range(1, year_count + 1)})
+    for col in [f'Y{i} Delta' for i in range(1, year_count + 1)]:
+        if col not in pivot.columns:
+            pivot[col] = 0.0
+    cumulative_col = f'{year_count}Y Cumulative Delta'
+    pivot[cumulative_col] = pivot[[f'Y{i} Delta' for i in range(1, year_count + 1)]].sum(axis=1)
+    out = pivot.reset_index()
+    out = sdef[['scenario_id', 'scenario_label']].merge(out, on=['scenario_id', 'scenario_label'], how='left').fillna(0.0)
+    return out

@@ -39,6 +39,49 @@ def _parse_ids(json_text: str) -> list[str]:
     return []
 
 
+def _ordered_layers(layer_keys: list[str]) -> list[str]:
+    preferred = ['Internal', 'External', 'Net']
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for key in preferred + [str(x) for x in layer_keys]:
+        if key and key not in seen:
+            seen.add(key)
+            ordered.append(key)
+    return ordered
+
+
+def _normalize_overview_metrics_table(overview_metrics: pd.DataFrame | None) -> pd.DataFrame:
+    if overview_metrics is None:
+        return pd.DataFrame(columns=['Category', 'Metric', 'T1', 'T2', 'Delta'])
+    tmp = overview_metrics.copy().reset_index()
+    metric_col = None
+    for candidate in ['Metric', 'metric', 'index']:
+        if candidate in tmp.columns:
+            metric_col = candidate
+            break
+    if metric_col is None:
+        metric_col = str(tmp.columns[0]) if len(tmp.columns) > 0 else 'Metric'
+    if metric_col != 'Metric':
+        tmp = tmp.rename(columns={metric_col: 'Metric'})
+    if 'Metric' not in tmp.columns:
+        tmp['Metric'] = ''
+    col_t1 = next((c for c in tmp.columns if str(c).startswith('T1 ')), 'T1')
+    col_t2 = next((c for c in tmp.columns if str(c).startswith('T2 ')), 'T2')
+    col_d = next((c for c in tmp.columns if str(c).startswith('Delta')), 'Delta')
+    for missing in [col_t1, col_t2, col_d]:
+        if missing not in tmp.columns:
+            tmp[missing] = np.nan
+    return pd.DataFrame(
+        {
+            'Category': 'Metrics Table',
+            'Metric': tmp['Metric'].astype(str),
+            'T1': pd.to_numeric(tmp[col_t1], errors='coerce'),
+            'T2': pd.to_numeric(tmp[col_t2], errors='coerce'),
+            'Delta': pd.to_numeric(tmp[col_d], errors='coerce'),
+        }
+    )
+
+
 def _curve_rate_by_tenor(
     *,
     tenor_points: pd.Series,
@@ -237,9 +280,15 @@ def build_export_context(
     active_ids_json: str,
     overview_metrics: pd.DataFrame | None = None,
     overview_delta_kpis: dict[str, float] | None = None,
+    overview_metrics_by_layer: dict[str, pd.DataFrame] | None = None,
+    overview_delta_kpis_by_layer: dict[str, dict[str, float]] | None = None,
     yearly_summary: pd.DataFrame | None = None,
     monthly_base: pd.DataFrame | None = None,
     monthly_scenarios: pd.DataFrame | None = None,
+    yearly_summary_by_layer: dict[str, pd.DataFrame] | None = None,
+    monthly_base_by_layer: dict[str, pd.DataFrame] | None = None,
+    monthly_scenarios_by_layer: dict[str, pd.DataFrame] | None = None,
+    additional_metadata: dict[str, Any] | None = None,
     calendar_runoff: pd.DataFrame | None = None,
     runoff_delta: pd.DataFrame | None = None,
     curve_df: pd.DataFrame | None = None,
@@ -258,52 +307,69 @@ def build_export_context(
 
     notes: list[str] = []
 
-    if overview_metrics is None:
-        overview_metrics_df = pd.DataFrame(columns=['Category', 'Metric', 'T1', 'T2', 'Delta'])
-    else:
-        tmp = overview_metrics.copy().reset_index()
-        metric_col = None
-        for candidate in ['Metric', 'metric', 'index']:
-            if candidate in tmp.columns:
-                metric_col = candidate
-                break
-        if metric_col is None:
-            metric_col = str(tmp.columns[0]) if len(tmp.columns) > 0 else 'Metric'
-        if metric_col != 'Metric':
-            tmp = tmp.rename(columns={metric_col: 'Metric'})
-        if 'Metric' not in tmp.columns:
-            tmp['Metric'] = ''
-        col_t1 = next((c for c in tmp.columns if str(c).startswith('T1 ')), 'T1')
-        col_t2 = next((c for c in tmp.columns if str(c).startswith('T2 ')), 'T2')
-        col_d = next((c for c in tmp.columns if str(c).startswith('Delta')), 'Delta')
-        for missing in [col_t1, col_t2, col_d]:
-            if missing not in tmp.columns:
-                tmp[missing] = np.nan
-        overview_metrics_df = pd.DataFrame(
-            {
-                'Category': 'Metrics Table',
-                'Metric': tmp['Metric'].astype(str),
-                'T1': pd.to_numeric(tmp[col_t1], errors='coerce'),
-                'T2': pd.to_numeric(tmp[col_t2], errors='coerce'),
-                'Delta': pd.to_numeric(tmp[col_d], errors='coerce'),
-            }
+    metrics_by_layer = overview_metrics_by_layer or {'Internal': overview_metrics}
+    delta_kpis_by_layer = overview_delta_kpis_by_layer or {'Internal': (overview_delta_kpis or {})}
+    yearly_by_layer = yearly_summary_by_layer or {'Internal': (yearly_summary if yearly_summary is not None else pd.DataFrame())}
+    base_by_layer = monthly_base_by_layer or {'Internal': (monthly_base if monthly_base is not None else pd.DataFrame())}
+    scenarios_by_layer = monthly_scenarios_by_layer or {'Internal': (monthly_scenarios if monthly_scenarios is not None else pd.DataFrame())}
+
+    all_layer_keys = _ordered_layers(
+        list(metrics_by_layer.keys())
+        + list(delta_kpis_by_layer.keys())
+        + list(yearly_by_layer.keys())
+        + list(base_by_layer.keys())
+        + list(scenarios_by_layer.keys())
+    )
+
+    overview_frames: list[pd.DataFrame] = []
+    scenario_delta_frames: list[pd.DataFrame] = []
+    scenario_absolute_frames: list[pd.DataFrame] = []
+
+    for layer in all_layer_keys:
+        metrics_df = _normalize_overview_metrics_table(metrics_by_layer.get(layer))
+        kpi_rows = [
+            {'Category': 'Delta KPI', 'Metric': str(k), 'T1': np.nan, 'T2': np.nan, 'Delta': float(v)}
+            for k, v in (delta_kpis_by_layer.get(layer) or {}).items()
+        ]
+        if kpi_rows:
+            metrics_df = pd.concat([pd.DataFrame(kpi_rows), metrics_df], ignore_index=True)
+        metrics_df.insert(0, 'Layer', layer)
+        overview_frames.append(metrics_df)
+
+        layer_yearly = yearly_by_layer.get(layer) if yearly_by_layer.get(layer) is not None else pd.DataFrame()
+        layer_base = base_by_layer.get(layer) if base_by_layer.get(layer) is not None else pd.DataFrame()
+        layer_scenarios = scenarios_by_layer.get(layer) if scenarios_by_layer.get(layer) is not None else pd.DataFrame()
+
+        delta_df = build_scenario_matrix_table(layer_yearly, view_mode='delta')
+        if not delta_df.empty:
+            delta_df.insert(0, 'Layer', layer)
+            scenario_delta_frames.append(delta_df)
+
+        absolute_df = build_scenario_matrix_table(
+            layer_yearly,
+            view_mode='absolute',
+            monthly_base=layer_base,
+            monthly_scenarios=layer_scenarios,
         )
+        if not absolute_df.empty:
+            absolute_df.insert(0, 'Layer', layer)
+            scenario_absolute_frames.append(absolute_df)
 
-    kpi_rows = []
-    for k, v in (overview_delta_kpis or {}).items():
-        kpi_rows.append({'Category': 'Delta KPI', 'Metric': str(k), 'T1': np.nan, 'T2': np.nan, 'Delta': float(v)})
-    if kpi_rows:
-        overview_metrics_df = pd.concat([pd.DataFrame(kpi_rows), overview_metrics_df], ignore_index=True)
-
-    yearly_summary = yearly_summary if yearly_summary is not None else pd.DataFrame()
-    monthly_base = monthly_base if monthly_base is not None else pd.DataFrame()
-    monthly_scenarios = monthly_scenarios if monthly_scenarios is not None else pd.DataFrame()
-    scenario_delta = build_scenario_matrix_table(yearly_summary, view_mode='delta')
-    scenario_absolute = build_scenario_matrix_table(
-        yearly_summary,
-        view_mode='absolute',
-        monthly_base=monthly_base,
-        monthly_scenarios=monthly_scenarios,
+    non_empty_overview_frames = [frame for frame in overview_frames if not frame.empty]
+    overview_metrics_df = (
+        pd.concat(non_empty_overview_frames, ignore_index=True)
+        if non_empty_overview_frames
+        else pd.DataFrame(columns=['Layer', 'Category', 'Metric', 'T1', 'T2', 'Delta'])
+    )
+    scenario_delta = (
+        pd.concat(scenario_delta_frames, ignore_index=True)
+        if scenario_delta_frames
+        else pd.DataFrame(columns=['Layer', 'Scenario', 'Y1 Delta', 'Y2 Delta', 'Y3 Delta', 'Y4 Delta', 'Y5 Delta', '5Y Cumulative Delta'])
+    )
+    scenario_absolute = (
+        pd.concat(scenario_absolute_frames, ignore_index=True)
+        if scenario_absolute_frames
+        else pd.DataFrame(columns=['Layer', 'Scenario', 'Y1 Absolute', 'Y2 Absolute', 'Y3 Absolute', 'Y4 Absolute', 'Y5 Absolute', '5Y Cumulative Absolute'])
     )
     if scenario_delta.empty:
         notes.append('Scenario delta matrix unavailable for current selection.')
@@ -324,22 +390,24 @@ def build_export_context(
     )
     notes.extend(dist_notes)
 
-    metadata = pd.DataFrame(
-        [
-            {'Field': 'Generated At', 'Value': datetime.now().isoformat(timespec='seconds')},
-            {'Field': 'Workbook Path', 'Value': str(path)},
-            {'Field': 'Product', 'Value': str(product)},
-            {'Field': 'T1', 'Value': t1_me.date().isoformat()},
-            {'Field': 'T2', 'Value': t2_me.date().isoformat()},
-            {'Field': 'Growth Mode', 'Value': str(growth_mode)},
-            {'Field': 'Growth Monthly Value', 'Value': float(growth_monthly_value)},
-            {'Field': 'Scenario Set Count', 'Value': int(len(scenario_records))},
-            {'Field': 'Active Scenario IDs', 'Value': ', '.join(active_ids)},
-            {'Field': 'Report Scope', 'Value': 'Executive Pack'},
-            {'Field': 'Report Version', 'Value': '1'},
-            {'Field': 'Notes', 'Value': ' | '.join(notes) if notes else ''},
-        ]
-    )
+    metadata_rows = [
+        {'Field': 'Generated At', 'Value': datetime.now().isoformat(timespec='seconds')},
+        {'Field': 'Workbook Path', 'Value': str(path)},
+        {'Field': 'Product', 'Value': str(product)},
+        {'Field': 'T1', 'Value': t1_me.date().isoformat()},
+        {'Field': 'T2', 'Value': t2_me.date().isoformat()},
+        {'Field': 'Growth Mode', 'Value': str(growth_mode)},
+        {'Field': 'Growth Monthly Value', 'Value': float(growth_monthly_value)},
+        {'Field': 'Scenario Set Count', 'Value': int(len(scenario_records))},
+        {'Field': 'Active Scenario IDs', 'Value': ', '.join(active_ids)},
+        {'Field': 'Overview Layers', 'Value': ', '.join(all_layer_keys)},
+        {'Field': 'Report Scope', 'Value': 'Executive Pack'},
+        {'Field': 'Report Version', 'Value': '1'},
+        {'Field': 'Notes', 'Value': ' | '.join(notes) if notes else ''},
+    ]
+    for key, value in (additional_metadata or {}).items():
+        metadata_rows.append({'Field': str(key), 'Value': value})
+    metadata = pd.DataFrame(metadata_rows)
 
     return {
         'summary_metadata': metadata,

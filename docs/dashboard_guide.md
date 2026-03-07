@@ -43,8 +43,22 @@ Note: The main section is stateful. Reruns keep the selected section instead of 
 
 ### Overview
 - With `T2` enabled:
-  - delta KPI row (`T2 - T1`)
-  - compact metrics table (`T1`, `T2`, `Delta`)
+  - monthly view layer summary for `Internal`, `External`, and `Net`
+  - `Overview layer` toggle:
+    - `Internal`: current replication portfolio only
+    - `External`: mirrored external model only
+    - `Net`: arithmetic sum of internal + external
+  - layer-aware delta KPI row (`T2 - T1`)
+  - layer-aware compact metrics table (`T1`, `T2`, `Delta`)
+    - external models do not model accrued carry separately in v1; accrued delta is shown as `0`
+  - `External Model Settings` expander appears when the selected product has `daily_due_savings`
+    - settings are per product and session-scoped
+    - controls:
+      - `Initial Client Rate`
+      - `Mean Reversion`
+      - `a`
+      - `b`
+      - `c`
   - `Rate Scenario Analysis (5Y, vs Base Case)`:
     - parallel scenarios: `+/-50/100/200 bps`
     - twist scenarios (pivot at `6M`): `+/-5/10 bps` with opposite signs left vs right of pivot
@@ -79,11 +93,12 @@ Note: The main section is stateful. Reruns keep the selected section instead of 
     - download button appears after generation
     - download includes:
       - `Summary_Metadata`
-      - `Overview_Metrics`
-      - `Scenario_Matrix_Delta`
-      - `Scenario_Matrix_Absolute` (includes `BaseCase`)
+      - `Overview_Metrics` (layer-tagged `Internal` / `External` / `Net`)
+      - `Scenario_Matrix_Delta` (layer-tagged)
+      - `Scenario_Matrix_Absolute` (layer-tagged, includes `BaseCase`)
       - `Distribution_Month_Tenor_Y1` (T2-anchored first 12 months)
       - `Distribution_Monthly_Summary_Y1`
+    - refill/growth distribution sheets remain internal-only in manual external-profile v1
 - With `T2` disabled:
   - compact single-view summary cards
   - hint to enable comparison mode
@@ -132,6 +147,22 @@ Note: The main section is stateful. Reruns keep the selected section instead of 
 - Current implementation is fixed-rate.
 - Interest is reported in EUR with 30/360 conventions.
 - If `Deal_Data.product` is missing, the loader assigns `Default` to preserve compatibility with legacy inputs.
+- Optional sheet `External_Profile` enables Overview-only external-position analysis in manual-rate v1.
+- `External_Profile` schema:
+  - `product`
+  - `external_product_type`
+  - `calendar_month_end`
+  - `external_notional`
+  - `repricing_tenor_months`
+  - `manual_rate`
+- External product types currently supported:
+  - `manual_profile`
+  - `daily_due_savings`
+- External volume in Overview is mirrored from the internal notional path in absolute terms.
+- `daily_due_savings` uses liability sign by default and models client rate as:
+  - `a + b*1M + c*(10Y-1M)`
+  - with monthly mean reversion toward that equilibrium
+  - base curve held steady from `T2`
 - Cache refresh is manual: if workbook contents change at the same file path, click `Refresh Cached Calculations`.
 - Custom scenario persistence file: `.nii_custom_scenarios.json` in workspace root.
 
